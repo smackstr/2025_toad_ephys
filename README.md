@@ -1,4 +1,4 @@
-# Data Cleaning, Manipulation, and Analaysis for 2025 Toadlet Ephys Manuscript
+# Data Cleaning, Manipulation, and Analysis for 2025 Toadlet Ephys Manuscript
 
 ## What this project does
 This project analyzes experimental data to assess how size, development time, and age influence sensitivity to vibrations and sounds in juvenile toadlets (3 months to 1 year after metamorphosis) using the following approach:
