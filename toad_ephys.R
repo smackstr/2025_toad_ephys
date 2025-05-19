@@ -1,8 +1,5 @@
 # Script To-Do List --------------------------------------------------------------
 #1. Decide on analysis approach, specifically model-selection approach
-#2. Create exportable table for Supp Material -- use R Markdown for this? stargazer seems to be a thing
-# see https://debyeeneuro.com/wp-content/uploads/2016/03/table_workshop.pdf
-#stargazer(lmm.full.1, lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, type = "html", out="test.doc", intercept.bottom = F, intercept.top = T, digits = 2)
 
 # Load required packages and set working directory --------------------------------------------------------------
 
@@ -177,7 +174,7 @@ thresh_model_compare_juv <- function(x){
   #does the effect of age depend on development time and frequency?
   lmm.3intx.4 <- lmer(thresh.db ~ mean.days.forelimb + svl.mm*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
-  #does the effect of age depend on frequency and the effects of size depend on tdevelopment time?
+  #does the effect of age depend on frequency and the effects of size depend on development time?
   lmm.2intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on frequency and the effects of development time depend on age?
@@ -204,7 +201,7 @@ thresh_model_compare_juv <- function(x){
   #does the effect of age depend on frequency?
   lmm.1intx.6 <- lmer(thresh.db ~ svl.mm + factor(num.sampling)*factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
   
-  #additive effects of age, development time, and frequency?
+  #additive effects of age, size, development time, and frequency?
   lmm.add <- lmer(thresh.db ~ svl.mm + mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
   
   #null model
@@ -241,10 +238,58 @@ thresh_model_compare_juv <- function(x){
   
 }
 
-# Supp. Table 1 - model comparison -----------------------------------------
+# Create function for juvenile-adult model comparison -----------------------------------------
+thresh_model_compare_adultjuv <- function(x){
+  #candidate models - manually defined
+  #does the effect of stage/age (life.stage.num.sampling) depend on size and frequency?
+  lmm.full.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling*factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of stage/age depend on size independent of frequency?
+  lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling + factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of stage/age depend on frequency independent of size?
+  lmm.1intx.2 <- lmer(thresh.db ~ svl.mm + factor(freq.hz)*life.stage.num.sampling+ (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of size depend on frequency independent of stage/age?
+  lmm.1intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = x, na.action = na.omit)
+  
+  #additive effects of stage/age, size, and frequency?
+  lmm.add <- lmer(thresh.db ~ svl.mm + life.stage.num.sampling + factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
+  
+  #null model
+  lmm.null <- lmer(thresh.db ~ (1|combined.id), data = x, na.action = na.omit)
+  
+  #model comparison using AICc
+  model.sel = arrange(AICc(lmm.full.1,
+                           lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
+                           lmm.add,
+                           lmm.null), AICc) ; print(model.sel)
+  final.mod = eval(parse(text = paste(rownames(model.sel)[1]))) #best supported model
+  
+  # check assumptions of best-fit model
+  simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
+  testDispersion(final.mod)
+  testZeroInflation(final.mod)
+  testCategorical(final.mod, catPred = x$freq.hz[is.na(x$thresh.db)==FALSE]) 
+  testCategorical(final.mod, catPred = x$num.sampling[is.na(x$thresh.db)==FALSE]) 
+  
+  # estimates from best-supported model
+  print(car::Anova(final.mod, type = "III"))
+  print(summary(final.mod))
+  
+  #export model comparison table to file
+  stargazer::stargazer(lmm.full.1,
+                       lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
+                       lmm.add,
+                       lmm.null,
+                       type = "html", out=paste("modelcomparison", "_", deparse(substitute(x)), ".doc", sep=""), intercept.bottom = F, intercept.top = T, digits = 2)
+  
+}
+
+# Supp. Table 1 - juv-only model comparison for vibration -----------------------------------------
 thresh_model_compare_juv(vib.thresh.juv)
 
-# Supp. Table 2 - model comparison -----------------------------------------
+# Supp. Table 2 - juv-only model comparison for hearing -----------------------------------------
 thresh_model_compare_juv(hear.thresh.juv)
 
 
@@ -252,204 +297,11 @@ thresh_model_compare_juv(hear.thresh.juv)
 
 
 
-
-
-
-
-
-
-# Analyze: Effect of life stage (adult vs. juvenile three timepoints) and size on VIB threshold ----
-
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*factor(freq.hz)*factor(life.stage.num.sampling) + (1|combined.id), data = vib.thresh.clean, na.action = na.fail)
-mod_select <- dredge(lmm.full.1)
-
-nrow(mod_select)
-
-mod_select[1,]
-
-final.mod = summary(get.models(mod_select, delta==0)[[1]])
-
-par(mar = c(3,5,6,4))
-plot(mod_select, labAsExpr = TRUE)
-
-model.avg(mod_select, subset = delta < 4)
-
-confset.95p <- get.models(mod_select, cumsum(weight) <= .95)
-avgmod.95p <- model.avg(confset.95p)
-summary(avgmod.95p)
-confint(avgmod.95p)
-
-final.mod$call
-
-final.mod = lmer(thresh.db ~ factor(freq.hz) + factor(life.stage.num.sampling) + 
-                   (1 | combined.id) + factor(freq.hz):factor(life.stage.num.sampling), 
-                 data = vib.thresh.clean, na.action = na.fail)
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
-testDispersion(final.mod)
-testZeroInflation(final.mod)
-testCategorical(final.mod, catPred = vib.thresh.juv.clean$freq.hz) 
-
-car::Anova(final.mod, type = "III")
-summary(final.mod)
-
-pairs(emmeans(final.mod, ~ freq.hz), type = "response") 
-
-
-#candidate models
-
-#does the effect of life stage depend on the effects of size and frequency?
-lmm.full.1 <- lmer(thresh.ms2 ~ svl.mm*factor(freq.hz)*life.stage.num.sampling + (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-#does the effect of life stage depend on the effects of frequency?
-lmm.1intx.1 <- lmer(thresh.ms2 ~ svl.mm + factor(freq.hz)*life.stage.num.sampling + (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-#does the effect of life stage depend on the effects of size?
-lmm.1intx.2 <- lmer(thresh.ms2 ~ svl.mm*life.stage.num.sampling + factor(freq.hz) + (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-#does the effect of size depend on the effects of frequency?
-lmm.1intx.3 <- lmer(thresh.ms2 ~ svl.mm*factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-#additive effects of life stage, size, and frequency?
-lmm.add <- lmer(thresh.ms2 ~ svl.mm + factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-#null model
-lmm.null <- lmer(thresh.ms2 ~ (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-model.sel = arrange(AICc(lmm.full.1, 
-                         lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
-                         lmm.add,
-                         lmm.null), AICc)
-model.sel
-final.mod = eval(parse(text = paste(rownames(model.sel)[1])))
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
-testDispersion(final.mod)
-testZeroInflation(final.mod)
-testCategorical(final.mod, catPred = vib.thresh$freq.hz[is.na(vib.thresh$thresh.ms2)==FALSE]) 
-testCategorical(final.mod, catPred = vib.thresh$life.stage[is.na(vib.thresh$thresh.ms2)==FALSE]) 
-
-#log-transform response variable
-lmm.add.log <- lmer(log(thresh.ms2) ~ svl.mm + factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = vib.thresh, na.action = na.omit)
-
-# check assumptions of best-fit model with nlog-transformed response variable
-simulateResiduals(fittedModel = lmm.add.log, quantreg=T, plot = T)
-testDispersion(lmm.add.log)
-testZeroInflation(lmm.add.log)
-testCategorical(lmm.add.log, catPred = vib.thresh$freq.hz[is.na(vib.thresh$thresh.ms2)==FALSE]) 
-testCategorical(lmm.add.log, catPred = vib.thresh$life.stage.num.sampling[is.na(vib.thresh$thresh.ms2)==FALSE]) 
-
-# estimates from best-supported model
-car::Anova(lmm.add.log, type = "II")
-summary(lmm.add.log)
-
-pairs(emmeans(lmm.add.log, ~ life.stage.num.sampling, by = "freq.hz"), type = "response") #backtransformed to the response scale
-
-
-
-
-# Analyze: Effect of life stage and size on HEAR threshold ----
-
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*factor(freq.hz)*factor(life.stage.num.sampling) + (1|combined.id), data = hear.thresh.clean, na.action = na.fail)
-mod_select <- dredge(lmm.full.1)
-
-nrow(mod_select)
-
-mod_select[1,]
-
-final.mod = summary(get.models(mod_select, delta==0)[[1]])
-
-par(mar = c(3,5,6,4))
-plot(mod_select, labAsExpr = TRUE)
-
-model.avg(mod_select, subset = delta < 4)
-
-confset.95p <- get.models(mod_select, cumsum(weight) <= .95)
-avgmod.95p <- model.avg(confset.95p)
-summary(avgmod.95p)
-confint(avgmod.95p)
-
-final.mod$call
-
-final.mod = lmer(thresh.db ~ factor(freq.hz) + factor(life.stage.num.sampling) + 
-                   svl.mm + (1 | combined.id) + factor(freq.hz):factor(life.stage.num.sampling) + 
-                   factor(freq.hz):svl.mm + factor(life.stage.num.sampling):svl.mm + 
-                   factor(freq.hz):factor(life.stage.num.sampling):svl.mm, data = hear.thresh.clean, 
-                 na.action = na.fail)
- 
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
-testDispersion(final.mod)
-testZeroInflation(final.mod)
-testCategorical(final.mod, catPred = hear.thresh.clean$life.stage.num.sampling) 
-testCategorical(final.mod, catPred = hear.thresh.clean$freq.hz) 
-
-car::Anova(final.mod, type = "III")
-summary(final.mod)
-
-pairs(emmeans(final.mod, ~ freq.hz), type = "response") #backtransformed to the response scale
-
-
-
-
-
-#candidate models
-
-#does the effect of life stage depend on the effects of size and frequency?
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*factor(freq.hz)*life.stage.num.sampling + (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-#does the effect of life stage depend on the effects of frequency?
-lmm.1intx.1 <- lmer(thresh.db ~ svl.mm + factor(freq.hz)*life.stage.num.sampling + (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-#does the effect of life stage depend on the effects of size?
-lmm.1intx.2 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling + factor(freq.hz) + (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-#does the effect of size depend on the effects of frequency?
-lmm.1intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-#additive effects of life stage, size, and frequency?
-lmm.add <- lmer(thresh.db ~ svl.mm + factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-#null model
-lmm.null <- lmer(thresh.db ~ (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-model.sel = arrange(AICc(lmm.full.1, 
-                         lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
-                         lmm.add,
-                         lmm.null), AICc)
-model.sel
-final.mod = eval(parse(text = paste(rownames(model.sel)[1])))
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
-testDispersion(final.mod)
-testZeroInflation(final.mod)
-testCategorical(final.mod, catPred = hear.thresh$freq.hz[is.na(hear.thresh$thresh.db)==FALSE]) 
-testCategorical(final.mod, catPred = hear.thresh$life.stage.num.sampling[is.na(hear.thresh$thresh.db)==FALSE]) 
-
-#log-transform response variable
-lmm.full.1.log <- lmer(log(thresh.db) ~ svl.mm*factor(freq.hz)*life.stage.num.sampling + (1|combined.id), data = hear.thresh, na.action = na.omit)
-
-# check assumptions of best-fit model with nlog-transformed response variable
-simulateResiduals(fittedModel = lmm.full.1.log, quantreg=T, plot = T)
-testDispersion(lmm.full.1.log)
-testZeroInflation(lmm.full.1.log)
-testCategorical(lmm.full.1.log, catPred = hear.thresh$freq.hz[is.na(hear.thresh$thresh.db)==FALSE]) 
-testCategorical(lmm.full.1.log, catPred = hear.thresh$life.stage.num.sampling[is.na(hear.thresh$thresh.db)==FALSE]) 
-
-# estimates from best-supported model
-car::Anova(lmm.full.1, type = "III")
-summary(lmm.full.1)
-
-joint_tests(lmm.full.1, by = "freq.hz")
-emtrends(lmm.full.1, pairwise ~ life.stage.num.sampling, var = "svl.mm", by = "freq.hz", type = "response")
-
-emmip(lmm.full.1, life.stage.num.sampling ~ svl.mm | freq.hz, mult.name = "variety", cov.reduce = FALSE)
-
-
+# Supp. Table 3 - juv-adult model comparison for vibration ------------------
+thresh_model_compare_adultjuv(vib.thresh)
+
+# Supp. Table 4 - juv-adult model comparison for hearing ------------------
+thresh_model_compare_adultjuv(hear.thresh)
 
 # Figure 1: JUV ONLY threshold by life stage and age within life stage (num.sampling) -------
 
