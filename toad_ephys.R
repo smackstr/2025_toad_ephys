@@ -1,5 +1,8 @@
 # Script To-Do List --------------------------------------------------------------
-
+#1. Decide on analysis approach, specifically model-selection approach
+#2. Create exportable table for Supp Material -- use R Markdown for this? stargazer seems to be a thing
+# see https://debyeeneuro.com/wp-content/uploads/2016/03/table_workshop.pdf
+#stargazer(lmm.full.1, lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, type = "html", out="test.doc", intercept.bottom = F, intercept.top = T, digits = 2)
 
 # Load required packages and set working directory --------------------------------------------------------------
 
@@ -11,12 +14,32 @@ lapply(required_pckg, library, character.only=TRUE)
 wd = "~/Desktop/R Working Directory/Databases"
 setwd(wd)
 
+# Quick fix for stargazer <= 5.2.3 is.na() issue with long model names in R >= 4.2 from https://gist.github.com/alexeyknorre/b0780836f4cec04d41a863a683f91b53 -------------
+# Unload stargazer if loaded
+detach("package:stargazer",unload=T)
+# Delete it
+remove.packages("stargazer")
+# Download the source
+download.file("https://cran.r-project.org/src/contrib/stargazer_5.2.3.tar.gz", destfile = "stargazer_5.2.3.tar.gz")
+# Unpack
+untar("stargazer_5.2.3.tar.gz")
+# Read the sourcefile with .inside.bracket fun
+stargazer_src <- readLines("stargazer/R/stargazer-internal.R")
+# Move the length check 5 lines up so it precedes is.na(.)
+stargazer_src[1990] <- stargazer_src[1995]
+stargazer_src[1995] <- ""
+# Save back
+writeLines(stargazer_src, con="stargazer/R/stargazer-internal.R")
+# Compile and install the patched package
+install.packages("stargazer", repos = NULL, type="source")
+load("stargazer")
+
+
 # Load Datasets for Analysis -------------------------------------------
 vib.thresh <- read.csv("Database_Ephys - Vibration.csv", header = TRUE, skip = 0, na.strings = "NA")
 devo.data <- read.csv("Database_Metamorphosis - Metamorphosis Log.csv", header = TRUE, skip = 0, na.strings = "NA")
 morph.data.juv <- read.csv("Database_Morphometrics - Froglet_Toadlet Morphometrics.csv", header = TRUE, skip = 0, na.strings = "NA")
 hear.thresh <- read.csv("Database_Ephys - Hearing.csv", header = TRUE, skip = 0, na.strings = "NA")
-
 
 # Clean/Join Datasets for Analysis -------------------------------------------
 
@@ -49,10 +72,10 @@ vib.thresh <- vib.thresh %>%
             join_by(unique.id.juv)
   ) %>%
   #remove individuals not included in final dataset
-  filter(
-    date != "2025-04-24", #weird data day for RM_C_J029_6 
+  dplyr::filter(date != "2025-04-24", #weird data day for RM_C_J029_6 
     date != "2025-04-14",
-    combined.id != "RM_J041_8",
+    !(date == "2025-05-06" & combined.id != "RM_J041_8"),
+    !(date == "2025-05-12" & combined.id != "RM_J041_8"),
     !(date == "2025-05-05" & combined.id == "RM_J041_9"),
     combined.id != "RM_J027_4", #overflow individual
     is.na(svl.mm) == FALSE #adults that I started but didn't finish
@@ -78,10 +101,10 @@ hear.thresh <- hear.thresh %>%
             join_by(unique.id.juv)
             ) %>%
   #remove individuals not included in final dataset
-  filter(
-    date != "2025-04-24", #weird data day for RM_C_J029_6
+  dplyr::filter(date != "2025-04-24", #weird data day for RM_C_J029_6
     freq.hz != 400,
-    combined.id != "RM_J041_8",
+    !(date == "2025-05-06" & combined.id != "RM_J041_8"),
+    !(date == "2025-05-12" & combined.id != "RM_J041_8"),
     !(date == "2025-05-05" & combined.id == "RM_J041_9"),
     combined.id != "RM_J027_4") #overflow individual
 
@@ -116,6 +139,123 @@ hear.thresh.juv = hear.thresh %>% filter(life.stage == "juvenile")
 # create clean datasets without NAs to use for dredge
 vib.thresh.clean = vib.thresh %>% filter(is.na(thresh.db) == FALSE)
 hear.thresh.clean = hear.thresh %>% filter(is.na(thresh.db) == FALSE)
+
+
+# Summarize datasets-------------------
+vib.thresh.summary <- vib.thresh %>%
+  group_by(life.stage, num.sampling, freq.hz, .drop = TRUE) %>%
+  summarise(n = n(), 
+            mean.thresh.ms2 = mean(thresh.ms2, na.rm= TRUE), 
+            sd.thresh.ms2 = sd(thresh.ms2, na.rm= TRUE),
+            mean.mass.g = mean(mass.g, na.rm = TRUE),
+            mean.svl.mm = mean(svl.mm, na.rm = TRUE))
+
+hear.thresh.summary <- hear.thresh %>%
+  group_by(life.stage, num.sampling, freq.hz, .drop = TRUE) %>%
+  summarise(n = n(), 
+            mean.thresh.db = mean(thresh.db, na.rm= TRUE), 
+            sd.thresh.db = sd(thresh.db, na.rm= TRUE),
+            mean.mass.g = mean(mass.g, na.rm = TRUE),
+            mean.svl.mm = mean(svl.mm, na.rm = TRUE))
+
+
+# Create function for juvenile-only model comparison -----------------------------------------
+thresh_model_compare_juv <- function(x){
+  #candidate models - manually defined
+  #does the effect of age (num.sampling) depend on development time, size, and frequency?
+  lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age depend on the effects of development time and size similarly across frequency?
+  lmm.3intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(num.sampling) + factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age function independently from the effects of size, frequency, and age?
+  lmm.3intx.2 <- lmer(thresh.db ~ mean.days.forelimb*svl.mm*factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age depend on development time and frequency?
+  lmm.3intx.3 <- lmer(thresh.db ~ mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age depend on development time and frequency?
+  lmm.3intx.4 <- lmer(thresh.db ~ mean.days.forelimb + svl.mm*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age depend on frequency and the effects of size depend on tdevelopment time?
+  lmm.2intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of size depend on frequency and the effects of development time depend on age?
+  lmm.2intx.2 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + mean.days.forelimb*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of size depend on age and the effects of development time depend on frequency?
+  lmm.2intx.3 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + mean.days.forelimb*factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of size depend on development time?
+  lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age depend on development time?
+  lmm.1intx.2 <- lmer(thresh.db ~ factor(num.sampling)*mean.days.forelimb + factor(freq.hz) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of frequency depend on development time?
+  lmm.1intx.3 <- lmer(thresh.db ~ factor(freq.hz)*mean.days.forelimb + factor(num.sampling) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of size depend on age?
+  lmm.1intx.4 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of size depend on frequency?
+  lmm.1intx.5 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
+  
+  #does the effect of age depend on frequency?
+  lmm.1intx.6 <- lmer(thresh.db ~ svl.mm + factor(num.sampling)*factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
+  
+  #additive effects of age, development time, and frequency?
+  lmm.add <- lmer(thresh.db ~ svl.mm + mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
+  
+  #null model
+  lmm.null <- lmer(thresh.db ~ (1|combined.id), data = x, na.action = na.omit)
+  
+  #model comparison using AICc
+  model.sel = arrange(AICc(lmm.full.1,
+                           lmm.3intx.1, lmm.3intx.2, lmm.3intx.3, lmm.3intx.4,
+                           lmm.2intx.1, lmm.2intx.2, lmm.2intx.3,
+                           lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4, lmm.1intx.5, lmm.1intx.6,
+                           lmm.add,
+                           lmm.null), AICc) ; print(model.sel)
+  final.mod = eval(parse(text = paste(rownames(model.sel)[1]))) #best supported model
+  
+  # check assumptions of best-fit model
+  simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
+  testDispersion(final.mod)
+  testZeroInflation(final.mod)
+  testCategorical(final.mod, catPred = x$freq.hz[is.na(x$thresh.db)==FALSE]) 
+  testCategorical(final.mod, catPred = x$num.sampling[is.na(x$thresh.db)==FALSE]) 
+  
+  # estimates from best-supported model
+  car::Anova(final.mod, type = "III")
+  summary(final.mod)
+  
+  #export model comparison table to file
+  stargazer::stargazer(lmm.full.1,
+                       lmm.3intx.1, lmm.3intx.2, lmm.3intx.3, lmm.3intx.4,
+                       lmm.2intx.1, lmm.2intx.2, lmm.2intx.3,
+                       lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4, lmm.1intx.5, lmm.1intx.6,
+                       lmm.add,
+                       lmm.null,
+                       type = "html", out=paste("modelcomparison", "_", deparse(substitute(x)), ".doc", sep=""), intercept.bottom = F, intercept.top = T, digits = 2)
+  
+}
+
+# Supp. Table 1 - model comparison -----------------------------------------
+thresh_model_compare_juv(vib.thresh.juv)
+
+# Supp. Table 2 - model comparison -----------------------------------------
+thresh_model_compare_juv(hear.thresh.juv)
+
+
+
+
+
+
+
+
+
+
 
 
 # Analyze: Effect of life stage (adult vs. juvenile three timepoints) and size on VIB threshold ----
@@ -310,312 +450,8 @@ emtrends(lmm.full.1, pairwise ~ life.stage.num.sampling, var = "svl.mm", by = "f
 emmip(lmm.full.1, life.stage.num.sampling ~ svl.mm | freq.hz, mult.name = "variety", cov.reduce = FALSE)
 
 
-# SUPP TABLE 1, Analyze: Juvenile only, Effect of size and development time on VIB threshold ----
-
-
-# using automatic model definition functions
-
-vib.thresh.juv.clean = vib.thresh.juv %>% filter(is.na(thresh.db) == FALSE)
-
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv.clean, na.action = na.fail)
-
-mod_select <- dredge(lmm.full.1, rank = AICc)
-
-summary(model.avg(mod_select, subset = delta <= 4)) #model averaging of models within 2 of top model
-summary(get.models(mod_select, delta==0)[[1]])
-vcov(get.models(mod_select, delta==0)[[1]])
-plot(svl.mm ~ mean.days.forelimb, data = vib.thresh.juv.clean %>% filter(num.sampling == 3))
-
-final.mod.lmertest = get_model(lmerTest::step(lmm.full.1, direction = "both"))
-drop1(lmm.full.1)
-
-nrow(mod_select)
-
-mod_select[1,]
-
-final.mod.dredge = summary(get.models(mod_select, delta==0)[[1]])
-
-par(mar = c(3,5,6,4))
-plot(mod_select, labAsExpr = TRUE)
-
-model.avg(mod_select, subset = delta < 4)
-
-confset.95p <- get.models(mod_select, cumsum(weight) <= .95)
-avgmod.95p <- model.avg(confset.95p)
-summary(avgmod.95p)
-confint(avgmod.95p)
-
-final.mod$call
-
-final.mod = lmer(thresh.db ~ factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + svl.mm + (1 | combined.id) + factor(freq.hz):factor(num.sampling) + factor(freq.hz):svl.mm + factor(num.sampling):mean.days.forelimb + factor(num.sampling):svl.mm + factor(freq.hz):factor(num.sampling):svl.mm, data = vib.thresh.juv.clean, na.action = na.fail)
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
-testDispersion(final.mod)
-testZeroInflation(final.mod)
-testCategorical(final.mod, catPred = vib.thresh.juv.clean$freq.hz) 
-testCategorical(final.mod, catPred = vib.thresh.juv.clean$num.sampling) 
-
-car::Anova(final.mod, type = "III")
-summary(final.mod)
-
-pairs(emmeans(final.mod, ~ freq.hz), type = "response") #backtransformed to the response scale
-
-
-#candidate models - manually defined
-
-#does the effect of age depend on the effects of development time, size, and frequency?
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of size and frequency?
-lmm.3intx.1 <- lmer(thresh.db ~ mean.days.forelimb + svl.mm*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of development time and frequency?
-lmm.3intx.2 <- lmer(thresh.db ~ svl.mm + mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of development time and size?
-lmm.3intx.3 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(num.sampling) + factor(freq.hz) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of frequency and the effects of size depend on the effects of development time?
-lmm.2intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on age and the effects of development time depend on the effects of frequency?
-lmm.2intx.2 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + mean.days.forelimb*factor(freq.hz) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on frequency and the effects of development time depend on the effects of age?
-lmm.2intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + mean.days.forelimb*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on development time and the effects of frequency depend on the effects of age?
-lmm.2intx.4 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of frequency?
-lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of age?
-lmm.1intx.2 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of frequency?
-lmm.1intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of development time?
-lmm.1intx.4 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-#additive effects of age, development time, and frequency?
-lmm.add <- lmer(thresh.db ~ svl.mm + mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit, REML = TRUE)
-
-#null model
-lmm.null <- lmer(thresh.db ~ (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-model.sel = arrange(AICc(lmm.full.1, 
-                         lmm.3intx.1, lmm.3intx.2, lmm.3intx.3,
-                         lmm.2intx.1, lmm.2intx.2, lmm.2intx.3, lmm.2intx.4,
-                         lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4,
-                         lmm.add,
-                         lmm.null), AICc)
-
-msel = MuMIn::model.sel(lmm.full.1, 
-                         lmm.3intx.1, lmm.3intx.2, lmm.3intx.3,
-                         lmm.2intx.1, lmm.2intx.2, lmm.2intx.3, lmm.2intx.4,
-                         lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4,
-                         lmm.add,
-                         lmm.null)
-
-anova(lmm.full.1, 
-      lmm.3intx.1, lmm.3intx.2, lmm.3intx.3,
-      lmm.2intx.1, lmm.2intx.2, lmm.2intx.3, lmm.2intx.4,
-      lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4,
-      lmm.add,
-      lmm.null, test="Chisq")
-
-step_result <-step(lmm.full.1); get_model(step_result)
-
-model.sel
-final.mod = eval(parse(text = paste(rownames(model.sel)[1])))
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = lmm.3intx.1, quantreg=T, plot = T)
-testDispersion(lmm.3intx.1)
-testZeroInflation(lmm.3intx.1)
-testCategorical(lmm.3intx.1, catPred = vib.thresh.juv$freq.hz[is.na(vib.thresh.juv$thresh.db)==FALSE]) testCategorical(lmm.3intx.1, catPred = vib.thresh.juv$num.sampling[is.na(vib.thresh.juv$thresh.db)==FALSE]) 
-
-#log-transform response variable
-lmm.add.log <- lmer(log(thresh.ms2) ~ svl.mm + mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-lmm.1intx.3.log <- lmer(log(thresh.ms2) ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = vib.thresh.juv, na.action = na.omit)
-
-# check assumptions of best-fit model with nlog-transformed response variable
-simulateResiduals(fittedModel = lmm.add.log, quantreg=T, plot = T)
-testDispersion(lmm.add.log)
-testZeroInflation(lmm.add.log)
-testCategorical(lmm.add.log, catPred = vib.thresh.juv$freq.hz[is.na(vib.thresh.juv$thresh.ms2)==FALSE]) 
-
-# estimates from best-supported model
-car::Anova(lmm.add.log, type = "II")
-summary(lmm.add.log)
-
-car::Anova(lmm.3intx.1, type = "III")
-summary(lmm.3intx.1)
-
-pairs(emmeans(lmm.add.log, ~ num.sampling, by = "freq.hz"), type = "response") #backtransformed to the response scale
-pairs(emmeans(lmm.add.log, ~ freq.hz, by = "num.sampling"), type = "response") #backtransformed to the response scale
-
-
-# SUPP TABLE 2, Analyze: Juvenile only, Effect of size and development time on HEAR threshold ----
-
-# using MuMIN
-
-hear.thresh.juv.clean = hear.thresh.juv %>% filter(is.na(thresh.db) == FALSE)
-
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv.clean, na.action = na.fail)
-mod_select <- dredge(lmm.full.1, rank = AICc)
-
-nrow(mod_select)
-
-mod_select[1,]
-
-final.mod = summary(get.models(mod_select, delta==0)[[1]])
-final.mod$call
-
-par(mar = c(3,5,6,4))
-plot(mod_select[1,], labAsExpr = TRUE)
-
-summary(model.avg(mod_select, subset = delta <= 2)) #model averaging of models within 2 of top model
-
-confset.95p <- get.models(mod_select, cumsum(weight) <= .95)
-avgmod.95p <- model.avg(confset.95p)
-summary(avgmod.95p)
-confint(avgmod.95p)
-
-final.mod = lmer(thresh.db ~ factor(freq.hz) + factor(num.sampling) + 
-                   mean.days.forelimb + svl.mm + (1 | combined.id) + factor(freq.hz):factor(num.sampling) + 
-                   factor(freq.hz):svl.mm + factor(num.sampling):mean.days.forelimb + 
-                   factor(num.sampling):svl.mm + factor(freq.hz):factor(num.sampling):svl.mm, 
-                 data = hear.thresh.juv.clean, na.action = na.fail)
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
-testDispersion(final.mod)
-testZeroInflation(final.mod)
-testCategorical(final.mod, catPred = hear.thresh.juv.clean$freq.hz) 
-testCategorical(final.mod, catPred = hear.thresh.juv.clean$num.sampling) 
-
-car::Anova(final.mod, type = "III")
-summary(final.mod)
-
-
-
-#candidate models - manually defined
-
-#does the effect of age depend on the effects of development time, size, and frequency?
-lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of size and frequency?
-lmm.3intx.1 <- lmer(thresh.db ~ mean.days.forelimb + svl.mm*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of development time and frequency?
-lmm.3intx.2 <- lmer(thresh.db ~ svl.mm + mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of development time and size?
-lmm.3intx.3 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(num.sampling) + factor(freq.hz) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of age depend on the effects of frequency and the effects of size depend on the effects of development time?
-lmm.2intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on age and the effects of development time depend on the effects of frequency?
-lmm.2intx.2 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + mean.days.forelimb*factor(freq.hz) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on frequency and the effects of development time depend on the effects of age?
-lmm.2intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + mean.days.forelimb*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on development time and the effects of frequency depend on the effects of age?
-lmm.2intx.4 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of frequency?
-lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of age?
-lmm.1intx.2 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of frequency?
-lmm.1intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#does the effect of size depend on the effects of development time?
-lmm.1intx.4 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#additive effects of age, development time, and frequency?
-lmm.add <- lmer(thresh.db ~ svl.mm + mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-#null model
-lmm.null <- lmer(thresh.db ~ (1|combined.id), data = hear.thresh.juv, na.action = na.omit)
-
-model.sel = arrange(AICc(lmm.full.1, 
-                         lmm.3intx.1, lmm.3intx.2, lmm.3intx.3,
-                         lmm.2intx.1, lmm.2intx.2, lmm.2intx.3, lmm.2intx.4,
-                         lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4,
-                         lmm.add,
-                         lmm.null), AICc)
-
-msel = MuMIn::model.sel(lmm.full.1, 
-                        lmm.3intx.1, lmm.3intx.2, lmm.3intx.3,
-                        lmm.2intx.1, lmm.2intx.2, lmm.2intx.3, lmm.2intx.4,
-                        lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4,
-                        lmm.add,
-                        lmm.null)
-
-anova(lmm.full.1, 
-       lmm.3intx.1, lmm.3intx.2, lmm.3intx.3,
-       lmm.2intx.1, lmm.2intx.2, lmm.2intx.3, lmm.2intx.4,
-       lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4,
-       lmm.add,
-       lmm.null, test = "Chisq")
-
-
-model.sel
-final.mod = eval(parse(text = paste(rownames(model.sel)[1])))
-
-# check assumptions of best-fit model with non-transformed response variable
-simulateResiduals(fittedModel = lmm.3intx.1, quantreg=T, plot = T)
-testDispersion(lmm.3intx.1)
-testZeroInflation(lmm.3intx.1)
-testCategorical(lmm.3intx.1, catPred = hear.thresh.juv$freq.hz[is.na(hear.thresh.juv$thresh.db)==FALSE]) 
-testCategorical(lmm.3intx.1, catPred = hear.thresh.juv$num.sampling[is.na(hear.thresh.juv$thresh.db)==FALSE]) 
-
-# estimates from best-supported model
-car::Anova(lmm.3intx.1, type = "III")
-summary(lmm.3intx.1)
-
-
-
-# Summarize dataset-------------------
-vib.thresh.summary <- vib.thresh.juv %>%
-  group_by(num.sampling, freq.hz, .drop = TRUE) %>%
-  summarise(n = n(), 
-            mean.thresh.ms2 = mean(thresh.ms2, na.rm= TRUE), 
-            sd.thresh.ms2 = sd(thresh.ms2, na.rm= TRUE),
-            mean.mass.g = mean(mass.g, na.rm = TRUE),
-            mean.svl.mm = mean(svl.mm, na.rm = TRUE))
-
-hear.thresh.summary <- hear.thresh.juv %>%
-  group_by(num.sampling, freq.hz, .drop = TRUE) %>%
-  summarise(n = n(), 
-            mean.thresh.db = mean(thresh.db, na.rm= TRUE), 
-            sd.thresh.db = sd(thresh.db, na.rm= TRUE),
-            mean.mass.g = mean(mass.g, na.rm = TRUE),
-            mean.svl.mm = mean(svl.mm, na.rm = TRUE))
-
-# thresh.summary <- thresh %>%
-#   group_by(Type, Genus.species, Treatment, Freq..Hz., .drop = TRUE) %>%
-#   summarise(Individuals = n(), 
-#             Mean.Thresh = mean(Threshold..db., na.rm=TRUE), 
-#             SD = sd(Threshold..db., na.rm=TRUE),
-#             Mean.Mass = mean(Weight..g., na.rm = TRUE))
-# thresh.summary = thresh.summary[is.na(thresh.summary$Freq..Hz.) == FALSE,]
-# thresh.summary = thresh.summary[is.nan(thresh.summary$Mean.Thresh) == FALSE,]
-
 
 # Figure 1: JUV ONLY threshold by life stage and age within life stage (num.sampling) -------
-
-##SMS TRY JITTERING THESE BUT MAKE SURE TO EXPAND AXES TO ACCOMMODATE X,Y JITTER
 
 fig.1a <- ggplot() +
   
