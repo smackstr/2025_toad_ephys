@@ -1,11 +1,12 @@
 # Script To-Do List --------------------------------------------------------------
-#1. Decide on analysis approach, specifically model-selection approach
+#1. Update Fig. 3 to be a function to create all iterations of figure in ggarrange call
+#2. Finalize figures
 
 # Load required packages and set working directory --------------------------------------------------------------
 
 rm(list=ls())
 required_pckg = c("dplyr", "readr", "NatParksPalettes", "ggpubr", "RColorBrewer",
-                  "lme4", "MuMIn", "DHARMa", "stats", "latticeExtra", "cAIC4")
+                  "lme4", "MuMIn", "DHARMa", "car", "stats", "latticeExtra", "cAIC4", "stargazer", "sjPlot")
 lapply(required_pckg, library, character.only=TRUE)
 
 wd = "~/Desktop/R Working Directory/Databases"
@@ -29,7 +30,7 @@ stargazer_src[1995] <- ""
 writeLines(stargazer_src, con="stargazer/R/stargazer-internal.R")
 # Compile and install the patched package
 install.packages("stargazer", repos = NULL, type="source")
-load("stargazer")
+library("stargazer")
 
 
 # Load Datasets for Analysis -------------------------------------------
@@ -55,12 +56,12 @@ vib.thresh <- vib.thresh %>%
          thresh.ms2 = (10^((thresh.db-120)/20))*9.81,
          #thresh.cms2 = 100*((10^((thresh.db-120)/20))*9.81),
          #thresh.mms2 = 1000*((10^((thresh.db-120)/20))*9.81),
-         rel.dB = (thresh.db-120),
-         clip.thresh.db.plus3.ms2 = (10^((clip.thresh.db.plus3-120)/20))*9.81,
-         # assign >dB "thresholds" where I couldn't get OVER threshold due to clipping
          clip.thresh.db.plus3 = if_else(is.na(clip.thresh.db.plus3) == TRUE & is.na(thresh.db) == FALSE, 
-                                               thresh.db,
-                                               clip.thresh.db.plus3)
+                                        thresh.db,
+                                        clip.thresh.db.plus3), #allows better plotting because individual can have connected lines across frequencies, but then code overlays white points where clipping occurred
+         rel.db = (thresh.db-120),
+         clip.thresh.rel.db.plus3 = (clip.thresh.db.plus3-120),
+         clip.thresh.db.plus3.ms2 = (10^((clip.thresh.db.plus3-120)/20))*9.81,
          ) %>%
   #add mean developmental time for each juvenile tank, leaving NAs for adult tanks
   left_join(devo.data %>% 
@@ -71,8 +72,8 @@ vib.thresh <- vib.thresh %>%
   #remove individuals not included in final dataset
   dplyr::filter(date != "2025-04-24", #weird data day for RM_C_J029_6 
     date != "2025-04-14",
-    !(date == "2025-05-06" & combined.id != "RM_J041_8"),
-    !(date == "2025-05-12" & combined.id != "RM_J041_8"),
+    !(date == "2025-05-06" & combined.id == "RM_J041_8"),
+    !(date == "2025-05-12" & combined.id == "RM_J041_8"),
     !(date == "2025-05-05" & combined.id == "RM_J041_9"),
     combined.id != "RM_J027_4", #overflow individual
     is.na(svl.mm) == FALSE #adults that I started but didn't finish
@@ -89,7 +90,7 @@ hear.thresh <- hear.thresh %>%
          id.life.stage.num.sampling = factor(paste(combined.id, life.stage, num.sampling, sep = "_")),
          clip.thresh.db.plus3 = if_else(is.na(clip.thresh.db.plus3) == TRUE & is.na(thresh.db) == FALSE, 
                                         thresh.db,
-                                        clip.thresh.db.plus3)
+                                        clip.thresh.db.plus3), #allows better plotting because individual can have connected lines across frequencies, but then code overlays white points where clipping occurred
   ) %>%
   #add mean developmental time for each juvenile tank, leaving NAs for adult tanks
   left_join(devo.data %>% 
@@ -103,6 +104,7 @@ hear.thresh <- hear.thresh %>%
     !(date == "2025-05-06" & combined.id != "RM_J041_8"),
     !(date == "2025-05-12" & combined.id != "RM_J041_8"),
     !(date == "2025-05-05" & combined.id == "RM_J041_9"),
+        combined.id != "RM_NA_1", #odd adult
     combined.id != "RM_J027_4") #overflow individual
 
 
@@ -147,6 +149,15 @@ vib.thresh.summary <- vib.thresh %>%
             mean.mass.g = mean(mass.g, na.rm = TRUE),
             mean.svl.mm = mean(svl.mm, na.rm = TRUE))
 
+vib.thresh.summary.reldB <- vib.thresh %>%
+  group_by(life.stage, num.sampling, freq.hz, .drop = TRUE) %>%
+  summarise(n = n(), 
+            mean.thresh.reldB = mean(rel.dB, na.rm= TRUE), 
+            sd.thresh.reldB = sd(rel.dB, na.rm= TRUE),
+            mean.mass.g = mean(mass.g, na.rm = TRUE),
+            mean.svl.mm = mean(svl.mm, na.rm = TRUE))
+
+
 hear.thresh.summary <- hear.thresh %>%
   group_by(life.stage, num.sampling, freq.hz, .drop = TRUE) %>%
   summarise(n = n(), 
@@ -155,86 +166,143 @@ hear.thresh.summary <- hear.thresh %>%
             mean.mass.g = mean(mass.g, na.rm = TRUE),
             mean.svl.mm = mean(svl.mm, na.rm = TRUE))
 
+# Create function to determine random effects structure ------------
+thresh_reffects_juv = function(x){
+
+  #random effect for intercept
+lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+
+#random effect for intercept and slope
+lmm.full.1.slopes.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + (1+factor(num.sampling)|combined.id), data = x, na.action = na.omit)
+
+#fixed intercept, random effect for slope
+lmm.full.1.slopes.2 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + (0+factor(num.sampling)|combined.id), data = x, na.action = na.omit)
+
+if((anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[2] < 0.05 &
+    is.na(anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[3]) == TRUE)){
+      print("use random effect for intercept and slope")}else{
+        if(anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[3] < 0.05 &
+        is.na(anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[3]) == FALSE){
+        print("use fixed intercept and random effect for slope")}else{
+          print("use random effect for intercept model")}
+      }
+}
+
+thresh_reffects = function(x){
+  
+  #random effect for intercept
+  lmm.full.1 <- lmer(thresh.db ~ svl.mm*poly(freq.hz, 3, raw= FALSE)*factor(life.stage.num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  #random effect for intercept and slope
+  lmm.full.1.slopes.1 <- lmer(thresh.db ~ svl.mm*poly(freq.hz, 3, raw= FALSE)*factor(life.stage.num.sampling) + (1+factor(num.sampling)|combined.id), data = x, na.action = na.omit)
+  
+  #fixed intercept, random effect for slope
+  lmm.full.1.slopes.2 <- lmer(thresh.db ~ svl.mm*poly(freq.hz, 3, raw= FALSE)*factor(life.stage.num.sampling) + (0+factor(num.sampling)|combined.id), data = x, na.action = na.omit)
+  
+  if((anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[2] < 0.05 &
+      is.na(anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[3]) == TRUE)){
+    print("use random effect for intercept and slope")}else{
+      if(anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[3] < 0.05 &
+         is.na(anova(lmm.full.1, lmm.full.1.slopes.1, lmm.full.1.slopes.2)$"Pr(>Chisq)"[3]) == FALSE){
+        print("use fixed intercept and random effect for slope")}else{
+          print("use random effect for intercept model")}
+    }
+}
 
 # Create function for juvenile-only model comparison -----------------------------------------
-thresh_model_compare_juv <- function(x){
+thresh_model_compare_juv <- function(x){ 
+
   #candidate models - manually defined
   #does the effect of age (num.sampling) depend on development time, size, and frequency?
-  lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.full.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  
+  lmm.full.1.ordinal <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*ordered(freq.hz, levels = unique(x$freq.hz))*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age depend on the effects of development time and size similarly across frequency?
-  lmm.3intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(num.sampling) + factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.3intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb*factor(num.sampling) + poly(freq.hz, 3, raw= FALSE) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age function independently from the effects of size, frequency, and age?
-  lmm.3intx.2 <- lmer(thresh.db ~ mean.days.forelimb*svl.mm*factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.3intx.2 <- lmer(thresh.db ~ mean.days.forelimb*svl.mm*poly(freq.hz, 3, raw= FALSE) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age depend on development time and frequency?
-  lmm.3intx.3 <- lmer(thresh.db ~ mean.days.forelimb*factor(freq.hz)*factor(num.sampling) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
+  lmm.3intx.3 <- lmer(thresh.db ~ mean.days.forelimb*poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age depend on development time and frequency?
-  lmm.3intx.4 <- lmer(thresh.db ~ mean.days.forelimb + svl.mm*factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.3intx.4 <- lmer(thresh.db ~ mean.days.forelimb + svl.mm*poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age depend on frequency and the effects of size depend on development time?
-  lmm.2intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.2intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + poly(freq.hz, 3, raw= FALSE)*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on frequency and the effects of development time depend on age?
-  lmm.2intx.2 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + mean.days.forelimb*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.2intx.2 <- lmer(thresh.db ~ svl.mm*poly(freq.hz, 3, raw= FALSE) + mean.days.forelimb*factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on age and the effects of development time depend on frequency?
-  lmm.2intx.3 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + mean.days.forelimb*factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.2intx.3 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + mean.days.forelimb*poly(freq.hz, 3, raw= FALSE) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on development time?
-  lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*mean.days.forelimb + poly(freq.hz, 3, raw= FALSE) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age depend on development time?
-  lmm.1intx.2 <- lmer(thresh.db ~ factor(num.sampling)*mean.days.forelimb + factor(freq.hz) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.2 <- lmer(thresh.db ~ factor(num.sampling)*mean.days.forelimb + poly(freq.hz, 3, raw= FALSE) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of frequency depend on development time?
-  lmm.1intx.3 <- lmer(thresh.db ~ factor(freq.hz)*mean.days.forelimb + factor(num.sampling) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.3 <- lmer(thresh.db ~ poly(freq.hz, 3, raw= FALSE)*mean.days.forelimb + factor(num.sampling) + svl.mm + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on age?
-  lmm.1intx.4 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.4 <- lmer(thresh.db ~ svl.mm*factor(num.sampling) + poly(freq.hz, 3, raw= FALSE) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on frequency?
-  lmm.1intx.5 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.5 <- lmer(thresh.db ~ svl.mm*poly(freq.hz, 3, raw= FALSE) + factor(num.sampling) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of age depend on frequency?
-  lmm.1intx.6 <- lmer(thresh.db ~ svl.mm + factor(num.sampling)*factor(freq.hz) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
-  
+  lmm.1intx.6 <- lmer(thresh.db ~ svl.mm + factor(num.sampling)*poly(freq.hz, 3, raw= FALSE) + mean.days.forelimb + (1|combined.id), data = x, na.action = na.omit)
+
   #additive effects of age, size, development time, and frequency?
-  lmm.add <- lmer(thresh.db ~ svl.mm + mean.days.forelimb + factor(freq.hz) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
+  lmm.add <- lmer(thresh.db ~ svl.mm + mean.days.forelimb + poly(freq.hz, 3, raw= FALSE) + factor(num.sampling) + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
   
   #null model
   lmm.null <- lmer(thresh.db ~ (1|combined.id), data = x, na.action = na.omit)
   
   #model comparison using AICc
-  model.sel = arrange(AICc(lmm.full.1,
-                           lmm.3intx.1, lmm.3intx.2, lmm.3intx.3, lmm.3intx.4,
-                           lmm.2intx.1, lmm.2intx.2, lmm.2intx.3,
-                           lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4, lmm.1intx.5, lmm.1intx.6,
-                           lmm.add,
-                           lmm.null), AICc) ; print(model.sel)
-  final.mod = eval(parse(text = paste(rownames(model.sel)[1]))) #best supported model
+  model.sel = arrange(AICc(
+                  lmm.full.1, lmm.full.1.ordinal,
+                  lmm.3intx.1, lmm.3intx.2, lmm.3intx.3, lmm.3intx.4,
+                  lmm.2intx.1, lmm.2intx.2, lmm.2intx.3,
+                  lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4, lmm.1intx.5, lmm.1intx.6,
+                  lmm.add,
+                  lmm.null), AICc)
+     
+     final.mod = eval(parse(text = paste(rownames(model.sel)[1]))) #best supported model
   
   # check assumptions of best-fit model
   simulateResiduals(fittedModel = final.mod, quantreg=T, plot = T)
   testDispersion(final.mod)
   testZeroInflation(final.mod)
-  testCategorical(final.mod, catPred = x$freq.hz[is.na(x$thresh.db)==FALSE]) 
-  testCategorical(final.mod, catPred = x$num.sampling[is.na(x$thresh.db)==FALSE]) 
+  testCategorical(final.mod, catPred = x$num.sampling[is.na(x$thresh.db)==FALSE])
   
   # estimates from best-supported model
   car::Anova(final.mod, type = "III")
   summary(final.mod)
+  ranef(final.mod)
   
   #export model comparison table to file
-  stargazer::stargazer(lmm.full.1,
-                       lmm.3intx.1, lmm.3intx.2, lmm.3intx.3, lmm.3intx.4,
-                       lmm.2intx.1, lmm.2intx.2, lmm.2intx.3,
-                       lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4, lmm.1intx.5, lmm.1intx.6,
-                       lmm.add,
-                       lmm.null,
-                       type = "html", out=paste("modelcomparison", "_", deparse(substitute(x)), ".doc", sep=""), intercept.bottom = F, intercept.top = T, digits = 2)
+  # stargazer::stargazer(lmm.full.1.slopes, lmm.full.1.ordinal,
+  #                      lmm.3intx.1.slopes, lmm.3intx.2.slopes, lmm.3intx.3.slopes, lmm.3intx.4.slopes,
+  #                      lmm.2intx.1.slopes, lmm.2intx.2.slopes, lmm.2intx.3.slopes,
+  #                      lmm.1intx.1.slopes, lmm.1intx.2.slopes, lmm.1intx.3.slopes, lmm.1intx.4.slopes, lmm.1intx.5.slopes, lmm.1intx.6.slopes,
+  #                      lmm.add.slopes,
+  #                      lmm.null.slopes,
+  #                      lmm.full.1,
+  #                      lmm.3intx.1, lmm.3intx.2, lmm.3intx.3, lmm.3intx.4,
+  #                      lmm.2intx.1, lmm.2intx.2, lmm.2intx.3,
+  #                      lmm.1intx.1, lmm.1intx.2, lmm.1intx.3, lmm.1intx.4, lmm.1intx.5, lmm.1intx.6,
+  #                      lmm.add,
+  #                      lmm.null,
+  #                      type = "html", out=paste("modelcomparison", "_", deparse(substitute(x)), ".doc", sep=""), intercept.bottom = F, intercept.top = T, digits = 2)
+  
+  #rename final.mod and model.sel to store it in R working directory
+  assign(paste("final_model", deparse(substitute(x)), sep = "_"), final.mod, envir = .GlobalEnv)
+  assign(paste("model_compare", deparse(substitute(x)), sep = "_"), model.sel, envir = .GlobalEnv)
   
 }
 
@@ -242,25 +310,29 @@ thresh_model_compare_juv <- function(x){
 thresh_model_compare_adultjuv <- function(x){
   #candidate models - manually defined
   #does the effect of stage/age (life.stage.num.sampling) depend on size and frequency?
-  lmm.full.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling*factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.full.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling*poly(freq.hz, 2, raw=FALSE) + (1|combined.id), data = x, na.action = na.omit)
+  
+  lmm.full.1.ordinal <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling*ordered(freq.hz, levels = unique(x$freq.hz)) + (1|combined.id), data = x, na.action = na.omit)
+  
+  lmm.full.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling*poly(freq.hz, 2, raw=FALSE) + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of stage/age depend on size independent of frequency?
-  lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling + factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.1 <- lmer(thresh.db ~ svl.mm*life.stage.num.sampling + poly(freq.hz, 2, raw=FALSE)  + (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of stage/age depend on frequency independent of size?
-  lmm.1intx.2 <- lmer(thresh.db ~ svl.mm + factor(freq.hz)*life.stage.num.sampling+ (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.2 <- lmer(thresh.db ~ svl.mm + poly(freq.hz, 2, raw=FALSE) *life.stage.num.sampling+ (1|combined.id), data = x, na.action = na.omit)
   
   #does the effect of size depend on frequency independent of stage/age?
-  lmm.1intx.3 <- lmer(thresh.db ~ svl.mm*factor(freq.hz) + life.stage.num.sampling + (1|combined.id), data = x, na.action = na.omit)
+  lmm.1intx.3 <- lmer(thresh.db ~ svl.mm*poly(freq.hz, 2, raw=FALSE)  + life.stage.num.sampling + (1|combined.id), data = x, na.action = na.omit)
   
   #additive effects of stage/age, size, and frequency?
-  lmm.add <- lmer(thresh.db ~ svl.mm + life.stage.num.sampling + factor(freq.hz) + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
+  lmm.add <- lmer(thresh.db ~ svl.mm + life.stage.num.sampling + poly(freq.hz, 2, raw=FALSE)  + (1|combined.id), data = x, na.action = na.omit, REML = TRUE)
   
   #null model
   lmm.null <- lmer(thresh.db ~ (1|combined.id), data = x, na.action = na.omit)
   
   #model comparison using AICc
-  model.sel = arrange(AICc(lmm.full.1,
+  model.sel = arrange(AICc(lmm.full.1, lmm.full.1.ordinal,
                            lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
                            lmm.add,
                            lmm.null), AICc) ; print(model.sel)
@@ -278,244 +350,348 @@ thresh_model_compare_adultjuv <- function(x){
   print(summary(final.mod))
   
   #export model comparison table to file
-  stargazer::stargazer(lmm.full.1,
-                       lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
-                       lmm.add,
-                       lmm.null,
-                       type = "html", out=paste("modelcomparison", "_", deparse(substitute(x)), ".doc", sep=""), intercept.bottom = F, intercept.top = T, digits = 2)
+  # stargazer::stargazer(lmm.full.1, lmm.full.1.ordinal,
+  #                      lmm.1intx.1, lmm.1intx.2, lmm.1intx.3,
+  #                      lmm.add,
+  #                      lmm.null,
+  #                      type = "html", out=paste("modelcomparison", "_", deparse(substitute(x)), ".doc", sep=""), intercept.bottom = F, intercept.top = T, digits = 2)
+  
+  #rename final.mod and model.sel to store it in R working directory
+  assign(paste("final_model", deparse(substitute(x)), sep = "_"), final.mod, envir = .GlobalEnv)
+  assign(paste("model_compare", deparse(substitute(x)), sep = "_"), model.sel, envir = .GlobalEnv)
   
 }
+
 
 # Supp. Table 1 - juv-only model comparison for vibration -----------------------------------------
+
+#explore fits to data to determine if transformation needed, which influences the structure of the candidate models in function
+ggarrange(ggplot(vib.thresh.juv, 
+       aes(x = freq.hz, y = thresh.db, group = combined.id, color = combined.id)) +
+  facet_wrap(~ num.sampling) +
+  #geom_smooth(se = F, span = 1.2) +
+  stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+  stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +
+  geom_smooth(method = "lm", aes(x=freq.hz, y=thresh.db), inherit.aes = F, se = F, color="black"),
+  
+ggplot(vib.thresh.juv, 
+       aes(x = freq.hz^2, y = thresh.db, group = combined.id, color = combined.id)) +
+  facet_wrap(~ num.sampling) +
+  #geom_smooth(se = F, span = 1.2) +
+  stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+  stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+  geom_smooth(aes(x=freq.hz^2, y=thresh.db), inherit.aes = F, se = F, color="black"), #quadratic
+
+ggplot(vib.thresh.juv, 
+       aes(x = freq.hz^3, y = thresh.db, group = combined.id, color = combined.id)) +
+  facet_wrap(~ num.sampling) +
+  #geom_smooth(se = F, span = 1.2) +
+  stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+  stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+  geom_smooth(aes(x=freq.hz^3, y=thresh.db), inherit.aes = F, se = F, color="black"),
+
+nrow = 3, ncol = 1, common.legend = TRUE
+)
+
 thresh_model_compare_juv(vib.thresh.juv)
 
+#pairwise comparison for frequency
+pairs(emmeans::emmeans(final_model_vib.thresh.juv, ~num.sampling))
+car::Anova(final_model_vib.thresh.juv, type = "III")
+model_compare_vib.thresh.juv
+summary(final_model_vib.thresh.juv)
+vcov(final_model_vib.thresh.juv) 
+ranef(final_model_vib.thresh.juv)
+coef(final_model_vib.thresh.juv)
+
+MuMIn::r.squaredGLMM(final_model_vib.thresh.juv)
+sjPlot::tab_model(final_model_vib.thresh.juv)
+
+
 # Supp. Table 2 - juv-only model comparison for hearing -----------------------------------------
+
+#explore fits to data to determine if transformation needed, which influences the structure of the candidate models in function
+ggarrange(ggplot(hear.thresh.juv, 
+                 aes(x = freq.hz, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +
+            geom_smooth(method = "lm", aes(x=freq.hz, y=thresh.db), inherit.aes = F, se = F, color="black"),
+          
+          ggplot(hear.thresh.juv, 
+                 aes(x = freq.hz^2, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+            geom_smooth(aes(x=freq.hz^2, y=thresh.db), inherit.aes = F, se = F, color="black"), #quadratic
+          
+          ggplot(hear.thresh.juv, 
+                 aes(x = freq.hz^3, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+            geom_smooth(aes(x=freq.hz^3, y=thresh.db), inherit.aes = F, se = F, color="black"),
+          
+          nrow = 3, ncol = 1, common.legend = TRUE
+)
+
+thresh_reffects_juv(hear.thresh.juv)
 thresh_model_compare_juv(hear.thresh.juv)
 
+#view model comparison table & final model
+model_compare_hear.thresh.juv
+final_model_hear.thresh.juv
 
+#pairwise comparison for frequency
+pairs(emmeans::emmeans(final_model_hear.thresh.juv, ~num.sampling))
+car::Anova(final_model_hear.thresh.juv, type = "III")
+summary(final_model_hear.thresh.juv)
 
-
-
+MuMIn::r.squaredGLMM(final_model_hear.thresh.juv)
+sjPlot::tab_model(final_model_hear.thresh.juv)
 
 # Supp. Table 3 - juv-adult model comparison for vibration ------------------
+#explore fits to data to determine if transformation needed
+ggarrange(ggplot(vib.thresh, 
+                 aes(x = freq.hz, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ life.stage.num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +
+            geom_smooth(method = "lm", aes(x=freq.hz, y=thresh.db), inherit.aes = F, se = F, color="black"),
+          
+          ggplot(vib.thresh, 
+                 aes(x = freq.hz^2, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ life.stage.num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+            geom_smooth(aes(x=freq.hz^2, y=thresh.db), inherit.aes = F, se = F, color="black"), #quadratic
+          
+          ggplot(vib.thresh, 
+                 aes(x = freq.hz^3, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ life.stage.num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+            geom_smooth(aes(x=freq.hz^3, y=thresh.db), inherit.aes = F, se = F, color="black"),
+          
+          nrow = 3, ncol = 1, common.legend = TRUE
+)
+
 thresh_model_compare_adultjuv(vib.thresh)
 
+#view model comparison table and final model
+model_compare_vib.thresh
+final_model_vib.thresh
+
+#pairwise comparison for life.stage.num.sampling
+pairs(emmeans::emmeans(final_model_vib.thresh, ~freq.hz, by = "life.stage.num.sampling"))
+pairs(emmeans::emmeans(final_model_vib.thresh, ~life.stage.num.sampling, by = "freq.hz"))
+car::Anova(final_model_vib.thresh, type = "III")
+summary(final_model_vib.thresh)
+
+MuMIn::r.squaredGLMM(final_model_vib.thresh)
+sjPlot::tab_model(final_model_vib.thresh)
+
+
 # Supp. Table 4 - juv-adult model comparison for hearing ------------------
+#explore fits to data to determine if transformation needed
+ggarrange(ggplot(hear.thresh, 
+                 aes(x = freq.hz, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ life.stage.num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +
+            geom_smooth(method = "lm", aes(x=freq.hz, y=thresh.db), inherit.aes = F, se = F, color="black"),
+          
+          ggplot(hear.thresh, 
+                 aes(x = freq.hz^2, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ life.stage.num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+            geom_smooth(aes(x=freq.hz^2, y=thresh.db), inherit.aes = F, se = F, color="black"), #quadratic
+          
+          ggplot(hear.thresh, 
+                 aes(x = freq.hz^3, y = thresh.db, group = combined.id, color = combined.id)) +
+            facet_wrap(~ life.stage.num.sampling) +
+            #geom_smooth(se = F, span = 1.2) +
+            stat_summary(fun.y=mean, geom="line", size = 0.5, aes(color = combined.id, group = combined.id)) +
+            stat_summary(fun.y=mean, geom="point", color = "black", pch=21, size=2, aes(fill=combined.id)) +  
+            geom_smooth(aes(x=freq.hz^3, y=thresh.db), inherit.aes = F, se = F, color="black"),
+          
+          nrow = 3, ncol = 1, common.legend = TRUE
+)
+
+
 thresh_model_compare_adultjuv(hear.thresh)
 
-# Figure 1: JUV ONLY threshold by life stage and age within life stage (num.sampling) -------
+#view model comparison and final model
+model_compare_hear.thresh
+final_model_hear.thresh
 
-fig.1a <- ggplot() +
+#pairwise comparison for life.stage.num.sampling
+pairs(emmeans::emmeans(final_model_hear.thresh, ~freq.hz, by = "life.stage.num.sampling"))
+pairs(emmeans::emmeans(final_model_hear.thresh, ~life.stage.num.sampling, by = "freq.hz"))
+car::Anova(final_model_hear.thresh, type = "III")
+summary(final_model_hear.thresh)
+
+MuMIn::r.squaredGLMM(final_model_hear.thresh)
+sjPlot::tab_model(final_model_hear.thresh)
+
+# Figure 1: Juvenile-Adult comparison threshold by life stage and age within life stage (num.sampling) -------
+
+#Create function
+thresh_plot <- function(d, y_var, y_var_clip, y_title){
+  y_var = sym(y_var)
+  y_var_clip = sym(y_var_clip)
+
+  ggplot() +
   
-  facet_grid(cols = vars(factor(num.sampling)),
-             labeller = as_labeller(c('1' = "3 months", '2' = "6 months", '3' = "12 months"))
-  )+
-  
-  geom_point(data = vib.thresh.juv,
-             aes(y=clip.thresh.db.plus3.ms2, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-             size = 3, alpha=0.3, show.legend = FALSE) +
-  
-  geom_line(data = vib.thresh.juv,
-            aes(y=clip.thresh.db.plus3.ms2, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-            size = 1, alpha=0.3, show.legend = FALSE) +
+  geom_jitter(data = d,
+              aes(y=!!y_var, x = freq.hz, color = life.stage.num.sampling, group = combined.id),
+              size = 5, stroke = 1, alpha=0.3, width = 50, height = 0) +
   
   #add points where threshold above clipping level
-  geom_point(data = vib.thresh.juv %>%
-               filter(is.na(thresh.ms2) == TRUE), #need to convert units within this line
-             fill = "white", pch = 21,
-             aes(y=clip.thresh.db.plus3.ms2, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-             size = 3, stroke = 1, alpha=1.0, show.legend = FALSE) +
-  
-  # geom_line(data = vib.thresh,
-  #           aes(y=thresh.ms2, x = as.numeric(freq.hz), color = life.stage.num.sampling, group = combined.id)) +
-  
-  stat_summary(data = vib.thresh.juv,
-               fun.y=mean, geom="line", size = 1.2, colour="black",
-               aes(y=thresh.ms2, x = as.numeric(freq.hz), group = factor(num.sampling)), show.legend = FALSE) +
-  
-  stat_summary(data = vib.thresh.juv,
-               fun.data=function(x){mean_cl_normal(x, conf.int=.683)}, geom="errorbar", 
-               width=0.1, size = 0.9, colour="black", alpha=1, 
-               aes(y=thresh.ms2, x = as.numeric(freq.hz), group = factor(num.sampling)), show.legend = FALSE) +
-  
-  stat_summary(data = vib.thresh.juv,
-               fun.y=mean, geom="point", colour = "black", pch=21, size=9, 
-               aes(y=thresh.ms2, x = as.numeric(freq.hz), fill = factor(num.sampling), group = factor(num.sampling)), show.legend = FALSE) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=14),
-        axis.text.x=element_text(size=18, color = "black", angle = 90, hjust = 1, vjust = 0.5),
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
-  scale_x_continuous(name = "frequency (kHz)", limits = c(100,2000), breaks = c(sort(unique(vib.thresh$freq.hz)), 2000), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5", "2.0")) +
-  scale_y_continuous(name = "vibration threshold\n(dB re 1 m/s-2)")
-
-# add num.sampling colors to facet grid (code from: https://github.com/tidyverse/ggplot2/issues/2096)
-g.1a <- ggplot_gtable(ggplot_build(fig.1a))
-strip_t <- which(grepl('strip-t', g.1a$layout$name))
-fills <- c("#CC66FF", "#660066", "#330066")
-k <- 1
-for(i in strip_t){
-  j <- which(grepl('rect', g.1a$grobs[[i]]$grobs[[1]]$childrenOrder))
-  g.1a$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
-  k <- k+1
-}
-grid::grid.draw(g.1a) #produces final plot with colored headers
-
-
-fig.1a.reldB <- ggplot() +
-  
-  facet_grid(cols = vars(factor(num.sampling)),
-             labeller = as_labeller(c('1' = "3 months", '2' = "6 months", '3' = "12 months"))
-  )+
-  
-  geom_point(data = vib.thresh.juv,
-             aes(y=rel.dB, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-             size = 3, alpha=0.3, show.legend = FALSE) +
-  
-  geom_line(data = vib.thresh.juv,
-            aes(y=rel.dB, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-            size = 1, alpha=0.3, show.legend = FALSE) +
-  
-  #add points where threshold above clipping level
-  geom_point(data = vib.thresh.juv %>%
-                filter(is.na(thresh.db) == TRUE), 
+  geom_jitter(data = d %>%
+                filter(is.na(!!y_var) == TRUE), #need to convert units within this line
               fill = "white", pch = 21,
-              aes(y=clip.thresh.db.plus3-120, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id), #need to convert units within this line
-              size = 3, stroke = 1, alpha=1.0, show.legend = FALSE) +
-
-  geom_line(data = vib.thresh.juv %>%
-               filter(is.na(thresh.db) == TRUE), 
-             aes(y=clip.thresh.db.plus3-120, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id), #need to convert units within this line
-             size = 3, alpha=0.3, show.legend = FALSE) +
+              aes(y=!!y_var_clip, x = freq.hz, color = life.stage.num.sampling, group = combined.id),
+              size = 5, stroke = 1, alpha=0.6, width = 50, height = 0) +
   
-  stat_summary(data = vib.thresh.juv,
-               fun.y=mean, geom="line", size = 1.2, colour="black",
-               aes(y=rel.dB, x = as.numeric(freq.hz), group = factor(num.sampling)), show.legend = FALSE) +
+  stat_summary(data = d,
+               fun.y=mean, geom="line", size = 1.2, 
+               aes(y=!!y_var, x = freq.hz, color = life.stage.num.sampling, group = life.stage.num.sampling)) +
   
-  stat_summary(data = vib.thresh.juv,
-               fun.data=function(x){mean_cl_normal(x, conf.int=.683)}, geom="errorbar", 
+  stat_summary(data = d,
+               fun.data=function(d){mean_cl_normal(d, conf.int=.683)}, geom="errorbar", 
                width=0.1, size = 0.9, colour="black", alpha=1, 
-               aes(y=rel.dB, x = as.numeric(freq.hz), group = factor(num.sampling)), show.legend = FALSE) +
+               aes(y=!!y_var, x = freq.hz, group = life.stage.num.sampling)) +
   
-  stat_summary(data = vib.thresh.juv,
+  stat_summary(data = d,
                fun.y=mean, geom="point", colour = "black", pch=21, size=9, 
-               aes(y=rel.dB, x = as.numeric(freq.hz), fill = factor(num.sampling), group = factor(num.sampling)), show.legend = FALSE) +
+               aes(y=!!y_var, x =freq.hz, fill = life.stage.num.sampling, group = life.stage.num.sampling)) +
   
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
+  scale_colour_manual(values = c("#666666","#CC66FF", "#660066", "#330066"), labels = c("adult", "3 months", "6 months", "12 months")) +
+  scale_fill_manual(values = c("#666666","#CC66FF", "#660066", "#330066"), labels = c("adult", "3 months", "6 months", "12 months")) +
   
   theme_bw() +
   theme(legend.title = element_blank(),
-        legend.text = element_text(size=14),
-        axis.text.x=element_text(size=18, color = "black", angle = 90, hjust = 1, vjust = 0.5),
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
+        legend.text = element_text(size=20),
+        axis.text.x=element_text(size=22, color = "black", angle = 90, hjust = 1, vjust = 0.5), 
+        axis.text.y=element_text(size=22, color = "black"),
+        axis.title.y = element_text(size=22),
+        axis.title.x = element_text(size=22),
         panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
-  scale_x_continuous(name = "frequency (kHz)", limits = c(100,2000), breaks = c(sort(unique(vib.thresh$freq.hz)), 2000), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5", "2.0")) +
-  scale_y_continuous(name = "vibration threshold\n(dB re hearing)")
-
-# add num.sampling colors to facet grid (code from: https://github.com/tidyverse/ggplot2/issues/2096)
-g.1a.reldB <- ggplot_gtable(ggplot_build(fig.1a.reldB))
-strip_t <- which(grepl('strip-t', g.1a.reldB$layout$name))
-fills <- c("#CC66FF", "#660066", "#330066")
-k <- 1
-for(i in strip_t){
-  j <- which(grepl('rect', g.1a.reldB$grobs[[i]]$grobs[[1]]$childrenOrder))
-  g.1a.reldB$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
-  k <- k+1
+        panel.grid.minor = element_blank()) +
+  scale_x_continuous(name = "frequency (kHz)", limits = c(50,1550), breaks = sort(unique(d$freq.hz)), labels = sort(unique(d$freq.hz))) +
+  scale_y_continuous(name = y_title)
 }
-grid::grid.draw(g.1a.reldB) #produces final plot with colored headers
-
-
-fig.1b <- ggplot() +
-  
-  facet_grid(cols = vars(factor(num.sampling)),
-             labeller = as_labeller(c('1' = "3 months", '2' = "6 months", '3' = "12 months"))
-  )+
-  
-  geom_point(data = hear.thresh.juv,
-             aes(y=clip.thresh.db.plus3, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-             size = 3, alpha=0.3, show.legend = FALSE) +
-  
-  geom_line(data = hear.thresh.juv,
-            aes(y=clip.thresh.db.plus3, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-            size = 1, alpha=0.3, show.legend = FALSE) +
-  
-  #add points where threshold above clipping level
-  geom_point(data = hear.thresh.juv %>%
-               filter(is.na(thresh.db) == TRUE), #need to convert units within this line
-             fill = "white", pch = 21,
-             aes(y=clip.thresh.db.plus3, x = as.numeric(freq.hz), color = factor(num.sampling), group = combined.id),
-             size = 3, stroke = 1, alpha=1.0, width = 50, height = 0, show.legend = FALSE) +
-
-  stat_summary(data = hear.thresh.juv,
-               fun.y=mean, geom="line", size = 1.2, colour="black",
-               aes(y=thresh.db, x = as.numeric(freq.hz), group = factor(num.sampling)), show.legend = FALSE) +
-  
-  stat_summary(data = hear.thresh.juv,
-               fun.data=function(x){mean_cl_normal(x, conf.int=.683)}, geom="errorbar", 
-               width=0.1, size = 0.9, colour="black", alpha=1, 
-               aes(y=thresh.db, x = as.numeric(freq.hz), group = factor(num.sampling)), show.legend = FALSE) +
-  
-  stat_summary(data = hear.thresh.juv,
-               fun.y=mean, geom="point", colour = "black", pch=21, size=9, 
-               aes(y=thresh.db, x = as.numeric(freq.hz), fill = factor(num.sampling), group = factor(num.sampling)), show.legend = FALSE) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=14),
-        axis.text.x=element_text(size=18, color = "black", angle = 90, hjust = 1, vjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
-  scale_x_continuous(name = "frequency (kHz)", limits = c(100,2000), breaks = c(100,200,sort(unique(hear.thresh.juv$freq.hz))), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5", "2.0")) +
-  scale_y_continuous(name = "hearing threshold\n(dB)")
-
-# add num.sampling colors to facet grid (code from: https://github.com/tidyverse/ggplot2/issues/2096)
-g.1b <- ggplot_gtable(ggplot_build(fig.1b))
-strip_t <- which(grepl('strip-t', g.1b$layout$name))
-fills <- c("#CC66FF", "#660066", "#330066")
-k <- 1
-for(i in strip_t){
-  j <- which(grepl('rect', g.1b$grobs[[i]]$grobs[[1]]$childrenOrder))
-  g.1b$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
-  k <- k+1
-}
-grid::grid.draw(g.1b) #produces final plot with colored headers
-
 
 png("~/Desktop/R Working Directory/Plots/Figure1.png", units = "in", res = 300, width = 16, height = 12)
-ggarrange(g.1a,g.1b,
+ggarrange(thresh_plot(vib.thresh, "rel.db", "clip.thresh.rel.db.plus3", "vibration threshold\n(dB re 1 m/s-2)"), 
+          thresh_plot(hear.thresh, "thresh.db", "clip.thresh.db.plus3", "hearing threshold\n(dB re SPL)"), 
+          ncol = 1,
+          nrow = 2,
+          common.legend = TRUE,
+          labels = c("a", "b"),
+          font.label = list(size = 22, color = "black"))
+dev.off()
+
+# Figure 2: JUV ONLY threshold by life stage and age within life stage (num.sampling) -------
+
+thresh_plot_juv <- function(d, y_var, y_var_clip, y_title){
+  y_var = sym(y_var)
+  y_var_clip = sym(y_var_clip)
+  
+  fig <- ggplot() +
+    
+    facet_grid(cols = vars(factor(num.sampling)),
+               labeller = as_labeller(c('1' = "3 months", '2' = "6 months", '3' = "12 months"))
+    )+
+    
+    geom_point(data = d,
+               aes(y=!!y_var_clip, x = freq.hz, color = factor(num.sampling), group = combined.id),
+               size = 3, alpha=0.3, show.legend = FALSE) +
+    
+    geom_line(data = d,
+              aes(y=!!y_var_clip, x = freq.hz, color = factor(num.sampling), group = combined.id),
+              size = 1, alpha=0.3, show.legend = FALSE) +
+    
+    #add points where threshold above clipping level
+    geom_point(data = d %>%
+                 filter(is.na(!!y_var) == TRUE), #need to convert units within this line
+               fill = "white", pch = 21,
+               aes(y=!!y_var_clip, x = freq.hz, color = factor(num.sampling), group = combined.id),
+               size = 3, stroke = 1, alpha=1.0, show.legend = FALSE) +
+    
+    # mean points and lines based on non-clipped values
+    stat_summary(data = d,
+                 fun.y=mean, geom="line", size = 1.2, colour="black",
+                 aes(y=!!y_var, x = freq.hz, group = factor(num.sampling)), show.legend = FALSE) +
+    
+    stat_summary(data = d,
+                 fun.data=function(x){mean_cl_normal(x, conf.int=.683)}, geom="errorbar", 
+                 width=0.1, size = 0.9, colour="black", alpha=1, 
+                 aes(y=!!y_var, x = freq.hz, group = factor(num.sampling)), show.legend = FALSE) +
+    
+    stat_summary(data = d,
+                 fun.y=mean, geom="point", colour = "black", pch=21, size=9, 
+                 aes(y=!!y_var, x = freq.hz, fill = factor(num.sampling), group = factor(num.sampling)), show.legend = FALSE) +
+    
+    scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
+    scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
+    
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          legend.text = element_text(size=14),
+          axis.text.x=element_text(size=18, color = "black", angle = 90, hjust = 1, vjust = 0.5),
+          axis.text.y=element_text(size=18, color = "black"),
+          axis.title.y = element_text(size=18),
+          axis.title.x = element_text(size=18),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    scale_x_continuous(name = "frequency (kHz)", limits = c(100,2000), 
+                       breaks = if(max(d$freq.hz) < 2000){
+                         c(sort(unique(d$freq.hz)), 2000)}else{
+                           c(100,200,sort(unique(d$freq.hz)))}, 
+                       labels = if(max(d$freq.hz) < 2000){
+                         c(sort(unique(d$freq.hz)), 2000)}else{
+                           c(100,200,sort(unique(d$freq.hz)))}) +
+    scale_y_continuous(name = y_title)
+  
+  # add num.sampling colors to facet grid (code from: https://github.com/tidyverse/ggplot2/issues/2096)
+  g.1a <- ggplot_gtable(ggplot_build(fig))
+  strip_t <- which(grepl('strip-t', g.1a$layout$name))
+  fills <- c("#CC66FF", "#660066", "#330066")
+  k <- 1
+  for(i in strip_t){
+    j <- which(grepl('rect', g.1a$grobs[[i]]$grobs[[1]]$childrenOrder))
+    g.1a$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
+    k <- k+1
+  }
+  grid::grid.draw(g.1a)
+  
+  #rename g.1a and store it in R working directory
+  assign(paste("fig", deparse(substitute(d)), sep = "_"), g.1a, envir = .GlobalEnv)
+}
+
+thresh_plot_juv(vib.thresh.juv, "rel.db", "clip.thresh.rel.db.plus3", "vibration threshold (dB re 1 m/s-2)")
+thresh_plot_juv(hear.thresh.juv, "thresh.db", "clip.thresh.db.plus3", "hearing threshold (dB re SPL)")
+
+png("~/Desktop/R Working Directory/Plots/Figure2.png", units = "in", res = 300, width = 16, height = 12)
+ggarrange(fig_vib.thresh.juv,
+          fig_hear.thresh.juv,
           ncol = 1, nrow = 2)
 dev.off()
 
 
-png("~/Desktop/R Working Directory/Plots/Figure1.png", units = "in", res = 300, width = 16, height = 12)
-ggarrange(g.1a.reldB,g.1b,
-          ncol = 1, nrow = 2,
-          labels = c("a", "b"),
-          font.label = list(size = 20, color = "black"))
-dev.off()
-
-# FIGURE 2:  heatmap: threshold by size and age (num.sampling) -------
+# Figure 3:  heatmap: threshold by size and age (num.sampling) -------
 #helpful code to make panel plots: https://oscarperpinan.github.io/rastervis/FAQ.html
 
 fig.2a.3 <- levelplot(rel.dB ~ svl.mm * freq.hz, 
@@ -523,7 +699,7 @@ fig.2a.3 <- levelplot(rel.dB ~ svl.mm * freq.hz,
                       num.sampling == 3),
                     panel = panel.levelplot.points, cex = 1.2,
                     col.regions=colorRampPalette(brewer.pal(9, "Blues"))(25),
-                    colorkey=list(labels=list(cex=1.5), title = "vibrational threshold (dB re hearing)"),
+                    colorkey=list(at=seq(-105,-30,10), labels=list(cex=1.5, at=seq(-110,-20,10)), title = "vibrational threshold (dB re hearing)"),
                     xlab=list(label = 'snout-vent length (mm)', cex=1.5),
                     ylab=list(label = 'frequency (kHz)', cex = 1.5),
                     ylim = c(50,1550),
@@ -548,7 +724,7 @@ fig.2b.3 <- levelplot(thresh.db ~ svl.mm * freq.hz,
                     data = hear.thresh.juv %>% filter(num.sampling == 3),
                     panel = panel.levelplot.points, cex = 1.2,
                     col.regions=colorRampPalette(brewer.pal(9, "Blues"))(25),
-                    colorkey=list(labels=list(cex=1.5), title = "hearing threshold (dB)"),
+                    colorkey=list(at=seq(75,135,10), labels=list(cex=1.5, at=seq(75,135,10)), title = "hearing threshold (dB)"),
                     xlab=list(label = 'snout-vent length (mm)', cex=1.5),
                     ylab=list(label = 'frequency (kHz)', cex = 1.5),
                     ylim = c(250,2050),
@@ -567,132 +743,7 @@ gridExtra::grid.arrange(fig.2b.1, fig.2b.2, fig.2b.3,
 dev.off()
 
 
-# FIGURE 2:  heatmap: threshold by development time and age (num.sampling) -------
-#helpful code to make panel plots: https://oscarperpinan.github.io/rastervis/FAQ.html
-
-fig.2c.3 <- levelplot(rel.dB ~ mean.days.forelimb * freq.hz, 
-                    data = vib.thresh.juv %>% filter(
-                      num.sampling == 3
-                    ),
-                    panel = panel.levelplot.points, cex = 1.2,
-                    col.regions=colorRampPalette(brewer.pal(9, "Blues"))(25),
-                    colorkey=list(labels=list(cex=1.5), title = "vibrational threshold (dB re hearing)"),
-                    xlab=list(label = 'mean development time (days)', cex=1.5),
-                    ylab=list(label = 'frequency (kHz)', cex = 1.5),
-                    ylim = c(50,1550),
-                    #auto.key = list(title = "vib threshold", cex.title = 1.2),
-                    scales=list(y=list(at=c(100, 200, 300, 400, 700, 1100, 1500), 
-                                       labels = c("0.1", "0.2", "0.3", "0.4", "0.7", "1.1", "1.5"),
-                                       cex=1),
-                                x=list(cex=1)
-                    ),
-                    main="12 months"
-) +
-  layer_(panel.2dsmoother(..., n=200))
-#grid.text("vib threshold", x=0.92, y=0.2, hjust=0.5, vjust=1)
-
-png("~/Desktop/R Working Directory/Plots/Figure2c.png", units = "in", res = 300, width = 24, height = 12)
-gridExtra::grid.arrange(fig.2c.1, fig.2c.2, fig.2c.3,
-                        ncol = 3, nrow = 1)
-dev.off()
-
-
-
-fig.2d.3 <- levelplot(thresh.db ~ mean.days.forelimb * freq.hz, 
-                      data = hear.thresh.juv %>% filter(num.sampling == 3),
-                    panel = panel.levelplot.points, cex = 1.2,
-                    col.regions=colorRampPalette(brewer.pal(9, "Blues"))(25),
-                    colorkey=list(labels=list(cex=1.5), title = "hearing threshold (dB)"),
-                    xlab=list(label = 'mean development time (days)', cex=1.5),
-                    ylab=list(label = 'frequency (kHz)', cex = 1.5),
-                    ylim = c(250,2050),
-                    scales=list(y=list(at=c(300, 500, 700, 1100, 1500, 2000), 
-                                       labels = c("0.3", "0.5", "0.7", "1.1", "1.5", "2.0"),
-                                       cex=1),
-                                x = list(cex=1)
-                    ),
-                    main = "12 months"
-) +
-  layer_(panel.2dsmoother(..., n=200))
-
-
-png("~/Desktop/R Working Directory/Plots/Figure2d.png", units = "in", res = 300, width = 24, height = 12)
-gridExtra::grid.arrange(fig.2d.1, fig.2d.2, fig.2d.3,
-                        ncol = 3, nrow = 1)
-dev.off()
-
-
-# FIGURE 2?? heatmap plot size by devo time with thresholds
-for(i in 1:length(unique(hear.thresh.juv$freq.hz))){
-  print(levelplot(thresh.db ~ mean.days.forelimb*svl.mm, data = hear.thresh.juv %>% filter(freq.hz == unique(hear.thresh.juv$freq.hz)[i]),
-          panel = panel.levelplot.points, cex = 1.2,
-          col.regions=colorRampPalette(brewer.pal(9, "Blues"))(25),
-          colorkey=list(labels=list(cex=1.5), title = "hearing threshold (dB)"),
-          xlab=list(label = 'mean development time (days)', cex=1.5),
-          ylab=list(label = 'svl (mm)', cex = 1.5),
-          #ylim = c(250,2050),
-          # scales=list(y=list(at=c(300, 500, 700, 1100, 1500, 2000), 
-          #                    labels = c("0.3", "0.5", "0.7", "1.1", "1.5", "2.0"),
-          #                    cex=1),
-                      # x = list(cex=1)
-          #)
-) +
-  layer_(panel.2dsmoother(..., n=200))
-)
-}
-
-# Figure 3: Juvenile-Adult comparison threshold by life stage and age within life stage (num.sampling) -------
-
-vib.thresh.plot <- ggplot() +
-  
-  geom_jitter(data = vib.thresh,
-             aes(y=thresh.ms2, x = as.numeric(freq.hz), color = life.stage.num.sampling, group = combined.id),
-             size = 5, stroke = 1, alpha=0.3, width = 50, height = 0) +
-  
-  #add points where threshold above clipping level
-  geom_jitter(data = vib.thresh %>%
-                filter(is.na(thresh.ms2) == TRUE), #need to convert units within this line
-              fill = "white", pch = 21,
-              aes(y=clip.thresh.db.plus3.ms2, x = as.numeric(freq.hz), color = life.stage.num.sampling, group = combined.id),
-              size = 5, stroke = 1, alpha=0.3, width = 50, height = 0) +
-  
-  # geom_line(data = vib.thresh,
-  #           aes(y=thresh.ms2, x = as.numeric(freq.hz), color = life.stage.num.sampling, group = combined.id)) +
-
-  stat_summary(data = vib.thresh,
-               fun.y=mean, geom="line", size = 1.2, colour="black",
-               aes(y=thresh.ms2, x = as.numeric(freq.hz), group = life.stage.num.sampling)) +
-    
-  stat_summary(data = vib.thresh,
-               fun.data=function(x){mean_cl_normal(x, conf.int=.683)}, geom="errorbar", 
-               width=0.1, size = 0.9, colour="black", alpha=1, 
-               aes(y=thresh.ms2, x = as.numeric(freq.hz), group = life.stage.num.sampling)) +
-  
-  stat_summary(data = vib.thresh,
-               fun.y=mean, geom="point", colour = "black", pch=21, size=9, 
-               aes(y=thresh.ms2, x = as.numeric(freq.hz), fill = life.stage.num.sampling, group = life.stage.num.sampling)) +
-  
-  scale_colour_manual(values = c("#666666","#CC66FF", "#660066", "#330066"), labels = c("adult", "3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#666666","#CC66FF", "#660066", "#330066"), labels = c("adult", "3 months", "6 months", "12 months")) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=24, color = "black", angle = 90, hjust = 1, vjust = 0.5), 
-        axis.text.y=element_text(size=24, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "frequency (kHz)", limits = c(50,1550), breaks = sort(unique(vib.thresh$freq.hz)), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5")) +
-  scale_y_continuous(name = "vibration threshold\n(dB re 1 m/s-2)")
-
-
-vib.thresh.plot.reldB <- ggplot() +
-  
-  geom_jitter(data = vib.thresh,
-              aes(y=rel.dB, x = as.numeric(freq.hz), color = life.stage.num.sampling, group = combined.id),
-              size = 5, stroke = 1, alpha=0.3, width = 50, height = 0, show.legend = FALSE) +
+stroke = 1, alpha=0.3, width = 50, height = 0, show.legend = FALSE) +
   
   #add points where threshold above clipping level
   geom_jitter(data = vib.thresh %>%
@@ -730,7 +781,7 @@ vib.thresh.plot.reldB <- ggplot() +
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank()) +
   scale_x_continuous(name = "frequency (kHz)", limits = c(50,1550), breaks = sort(unique(vib.thresh$freq.hz)), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5")) +
-  scale_y_continuous(name = "vibration threshold\n(dB re hearing)")
+  scale_y_continuous(name = "vibration threshold\n(dB re SPL)")
 
 
 
@@ -794,1028 +845,5 @@ dev.off()
 
 
 
-# PLOT: size as a function of age -------
-ggplot() +
-  geom_point(data = morph.data.juv,
-             aes(x = post.mm.weeks.num, y = svl.mm)) +
-  
-  geom_line(data = morph.data.juv,
-             aes(x = post.mm.weeks.num, y = svl.mm, group = combined.id)) +
-  
-  theme_bw() +
-  scale_x_continuous(name = "age (weeks post metamorphosis") +
-  scale_y_continuous(name = "snout-vent length (mm)")
 
-
-
-
-
-# PLOT: threshold by development time ----
-vib.thresh.plot.larvdur <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-
-  geom_point(data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",], pch = 21, color = "black",
-             aes(y=thresh.ms2, x = mean.days.forelimb, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  geom_smooth(method = "lm",
-              data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-              aes(y=thresh.ms2, x = mean.days.forelimb, color = factor(num.sampling), group = factor(num.sampling))) +
-  
-  scale_color_manual(values=c("gray90", "gray40", "gray20")) +
-  scale_fill_manual(values=c("gray90", "gray40", "gray20")) +
-  
-  # geom_smooth(method = "lm",
-  #             data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-  #             color = "black",
-  #             aes(y=thresh.ms2, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "larval duration (days)", limits = c(38,70)) +
-  scale_y_continuous(name = "vibrational threshold (dB re 1 m/s-2)")
-
-
-hear.thresh.plot.larvdur <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = hear.thresh[hear.thresh$life.stage == "juvenile" & hear.thresh$treatment != "overflow",], pch = 21, color = "black",
-             aes(y=clip.thresh.db.plus3, x = mean.days.forelimb, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  geom_smooth(method = "lm",
-              data = hear.thresh[hear.thresh$life.stage == "juvenile" & hear.thresh$treatment != "overflow",],
-              aes(y=clip.thresh.db.plus3, x = mean.days.forelimb, color = factor(num.sampling), group = factor(num.sampling))) +
-  
-  scale_color_manual(values=c("gray90", "gray40", "gray20")) +
-  scale_fill_manual(values=c("gray90", "gray40", "gray20")) +
-  
-  # geom_smooth(method = "lm",
-  #             data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-  #             color = "black",
-  #             aes(y=thresh.ms2, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "larval duration (days)", limits = c(38,70)) +
-  scale_y_continuous(name = "hearing threshold (dB)", limits = c(80,140), breaks = seq(80,140,15), labels = seq(80,140,15))
-
-ggarrange(vib.thresh.plot.larvdur, hear.thresh.plot.larvdur,
-          nrow = 2,
-          common.legend = TRUE)
-
-
-
-
-
-# PLOT: plotting by mass -------------------------------------------------------------
-
-vib.thresh.plot.mass <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = vib.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",), 
-             pch = 21, color = "black",
-             aes(y=thresh.ms2, x = mass.g, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  geom_smooth(method = "lm",
-              data = vib.thresh %>%
-                filter(life.stage == "juvenile",
-                       treatment != "overflow",
-                       freq.hz != "NA",),
-              aes(y=thresh.ms2, x = mass.g, color = factor(num.sampling), group = factor(num.sampling))) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  # geom_smooth(method = "lm",
-  #             data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-  #             color = "black",
-  #             aes(y=thresh.ms2, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 20),
-    legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=12, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=12, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mass (g)", limits = c(0.3,4), breaks = seq(0.2,3.8,0.6), labels = seq(0.2,3.8,0.6)) +
-  scale_y_continuous(name = "vib. threshold (dB re 1 m/s-2)")
-
-
-hear.thresh.plot.mass <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",),
-             pch = 21, color = "black",
-             aes(y=clip.thresh.db.plus3, x = mass.g, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  #threshold above clipping level
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      is.na(thresh.db) == TRUE,
-                      freq.hz != "NA",),
-             pch = 21, fill = "white",
-             aes(y=clip.thresh.db.plus3, x = mass.g, color = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  geom_smooth(method = "lm",
-              data = hear.thresh %>%
-                filter(life.stage == "juvenile",
-                       treatment != "overflow",
-                       is.na(thresh.db) == FALSE,
-                       freq.hz != "NA",),
-              aes(y=clip.thresh.db.plus3, x = mass.g, color = factor(num.sampling), group = factor(num.sampling))) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  # geom_smooth(method = "lm",
-  #             data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-  #             color = "black",
-  #             aes(y=thresh.ms2, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 20),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=12, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=12, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mass (g)", limits = c(0.3,4), breaks = seq(0.2,3.8,0.6), labels = seq(0.2,3.8,0.6)) +
-  scale_y_continuous(name = "hearing threshold (dB)", limits = c(80,140), breaks = seq(80,140,15), labels = seq(80,140,15))
-
-
-png("~/Desktop/R Working Directory/Plots/Juv-Mass.png", units = "in", res = 300, width = 16, height = 12)
-ggarrange(vib.thresh.plot.mass, hear.thresh.plot.mass, 
-          ncol = 1,
-          nrow = 2,
-          common.legend = TRUE,
-          labels = c("a", "b"),
-          font.label = list(size = 20, color = "black"))
-dev.off()
-
-
-# PLOT: plotting by svl -------------------------------------------------------------
-
-vib.thresh.plot.svl <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = vib.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",), 
-             pch = 21, color = "black",
-             aes(y=thresh.ms2, x = svl.mm, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  geom_smooth(method = "lm",
-              data = vib.thresh %>%
-                filter(life.stage == "juvenile",
-                       treatment != "overflow",
-                       freq.hz != "NA",),
-              aes(y=thresh.ms2, x = svl.mm, color = factor(num.sampling), group = factor(num.sampling))) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  # geom_smooth(method = "lm",
-  #             data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-  #             color = "black",
-  #             aes(y=thresh.ms2, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 20),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=14, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=14, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "svl (mm)", limits = c(15,38), breaks = seq(15,38,5), labels = seq(15,38,5)) +
-  scale_y_continuous(name = "vib. threshold (dB re 1 m/s-2)")
-
-
-hear.thresh.plot.svl <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",),
-             pch = 21, color = "black",
-             aes(y=clip.thresh.db.plus3, x = svl.mm, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  #threshold above clipping level
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      is.na(thresh.db) == TRUE,
-                      freq.hz != "NA",),
-             pch = 21, fill = "white",
-             aes(y=clip.thresh.db.plus3, x = svl.mm, color = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 4, alpha=1) +
-  
-  geom_smooth(method = "lm",
-              data = hear.thresh %>%
-                filter(life.stage == "juvenile",
-                       treatment != "overflow",
-                       is.na(thresh.db) == FALSE,
-                       freq.hz != "NA",),
-              aes(y=clip.thresh.db.plus3, x = svl.mm, color = factor(num.sampling), group = factor(num.sampling))) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  # geom_smooth(method = "lm",
-  #             data = vib.thresh[vib.thresh$life.stage == "juvenile" & vib.thresh$treatment != "overflow",],
-  #             color = "black",
-  #             aes(y=thresh.ms2, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 20),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=14, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=14, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "svl (mm)", limits = c(15,38), breaks = seq(15,38,5), labels = seq(15,38,5)) +
-  scale_y_continuous(name = "hearing threshold (dB)", limits = c(80,140), breaks = seq(80,140,15), labels = seq(80,140,15))
-
-
-png("~/Desktop/R Working Directory/Plots/Juv-SVL.png", units = "in", res = 300, width = 16, height = 12)
-ggarrange(vib.thresh.plot.svl, hear.thresh.plot.svl, 
-          ncol = 1,
-          nrow = 2,
-          common.legend = TRUE,
-          labels = c("a", "b"),
-          font.label = list(size = 20, color = "black"))
-dev.off()
-
-
-# PLOT: plotting by individual svl -------------------------------------------------------------
-
-vib.thresh.plot.svl.indiv <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = vib.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",), 
-             pch = 21, color = "black",
-             aes(y=thresh.ms2, x = svl.mm, fill = combined.id), 
-             size = 3, alpha=1) +
-  
-  geom_line(data = vib.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",), 
-             pch = 21, 
-             aes(y=thresh.ms2, x = svl.mm, color = combined.id), 
-             size = 0.5, alpha=1) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 20),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=14, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=14, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "svl (mm)", limits = c(15,38), breaks = seq(15,38,5), labels = seq(15,38,5)) +
-  scale_y_continuous(name = "vib. threshold (dB re 1 m/s-2)")
-
-
-hear.thresh.plot.svl.indiv <- ggplot() +
-  
-  facet_grid(cols = vars(factor(freq.hz))) +
-  
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",), 
-             pch = 21, color = "black",
-             aes(y=thresh.db, x = svl.mm, fill = combined.id), ## SMS YOU ARE HERE, color by freq,
-             size = 3, alpha=1) +
-  
-  geom_line(data = hear.thresh %>%
-              filter(life.stage == "juvenile",
-                     treatment != "overflow",
-                     freq.hz != "NA",), 
-            pch = 21, aes(y=thresh.db, x = svl.mm, color = combined.id), ## SMS YOU ARE HERE, color by freq,
-            size = 0.5, alpha=1) +
-  
-  
-  geom_point(data = hear.thresh[hear.thresh$life.stage == "juvenile" & hear.thresh$treatment != "overflow",], pch = 21,
-             aes(y=clip.thresh.db.plus3, x = svl.mm, fill = "white", color = combined.id), ## SMS YOU ARE HERE, color by freq,
-             size = 3, alpha=1) +
-  
-  geom_line(data = hear.thresh[hear.thresh$life.stage == "juvenile" & hear.thresh$treatment != "overflow",], pch = 21, 
-             aes(y=clip.thresh.db.plus3, x = svl.mm, color = combined.id), ## SMS YOU ARE HERE, color by freq,
-             size = 0.5, alpha=1) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 20),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=14, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=14, color = "black"),
-        axis.title.y = element_text(size=28),
-        axis.title.x = element_text(size=28),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "svl (mm)", limits = c(15,38), breaks = seq(15,38,5), labels = seq(15,38,5)) +
-  scale_y_continuous(name = "hearing threshold (dB)", limits = c(80,140), breaks = seq(80,140,15), labels = seq(80,140,15))
-
-
-png("~/Desktop/R Working Directory/Plots/Juv-SVL-Indiv.png", units = "in", res = 300, width = 16, height = 12)
-ggarrange(vib.thresh.plot.svl.indiv, hear.thresh.plot.svl.indiv, 
-          ncol = 1,
-          nrow = 2,
-          common.legend = FALSE,
-          labels = c("a", "b"),
-          font.label = list(size = 20, color = "black"))
-dev.off()
-
-
-# PLOT: plotting by individual -------------------------------------------------------------
-complete = c("RM_J001_10", "RM_J004_9", "RM_J005_7", "RM_J007_9", "RM_J010_6", "RM_J011_12", "RM_J020_7", "RM_J023_8")
-
-vib.thresh.plot.indiv <- ggplot() +
-  
-  facet_grid(cols = vars(factor(combined.id))) +
-  
-  geom_point(data = vib.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",
-                      combined.id %in% complete), 
-             pch = 21, color = "black",
-             aes(y=thresh.ms2, x = freq.hz, fill = factor(num.sampling)), 
-             size = 3, alpha=1) +
-  
-  geom_line(data = vib.thresh %>%
-              filter(life.stage == "juvenile",
-                     treatment != "overflow",
-                     freq.hz != "NA",
-                     combined.id %in% complete), 
-            pch = 21, 
-            aes(y=thresh.ms2, x = freq.hz, color = factor(num.sampling)), 
-            size = 0.5, alpha=1) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 10),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=10),
-        axis.text.x=element_text(size=10, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=10, color = "black"),
-        axis.title.y = element_text(size=14),
-        axis.title.x = element_text(size=14),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "frequency (kHz)", limits = c(100,1500), breaks = sort(unique(vib.thresh$freq.hz)), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5")) +
-  scale_y_continuous(name = "vib. threshold (dB re 1 m/s-2)")
-
-
-hear.thresh.plot.indiv <- ggplot() +
-  
-  facet_grid(cols = vars(factor(combined.id))) +
-  
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",
-                      combined.id %in% complete), 
-             pch = 21, color = "black",
-             aes(y=clip.thresh.db.plus3, x = freq.hz, fill = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 3, alpha=1) +
-  
-  #threshold above clipping level
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      is.na(thresh.db) == TRUE,
-                      freq.hz != "NA",
-                      combined.id %in% complete),
-             pch = 21, fill = "white",
-             aes(y=clip.thresh.db.plus3, x = freq.hz, color = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-             size = 3, alpha=1) +
-  
-  geom_line(data = hear.thresh %>%
-              filter(life.stage == "juvenile",
-                     treatment != "overflow",
-                     freq.hz != "NA",
-                     combined.id %in% complete),
-            aes(y=clip.thresh.db.plus3, x = freq.hz, color = factor(num.sampling)), ## SMS YOU ARE HERE, color by freq,
-            size = 0.5, alpha=1) +
-  
-  # extrapolated points because threshold above clipping level
-  geom_point(data = hear.thresh %>%
-               filter(life.stage == "juvenile",
-                      treatment != "overflow",
-                      freq.hz != "NA",
-                      is.na(thresh.db) == TRUE,
-                      combined.id %in% complete), 
-             pch = 21, fill = "white", 
-             aes(y=clip.thresh.db.plus3, x = freq.hz, color = factor(num.sampling)),
-             size = 3, alpha=1) +
-  
-  scale_colour_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  scale_fill_manual(values = c("#CC66FF", "#660066", "#330066"), labels = c("3 months", "6 months", "12 months")) +
-  
-  theme_bw() +
-  theme(strip.text = element_text(size = 10),
-        legend.title = element_blank(),
-        legend.position = "none",
-        legend.text = element_text(size=10),
-        axis.text.x=element_text(size=10, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=10, color = "black"),
-        axis.title.y = element_text(size=24),
-        axis.title.x = element_text(size=24),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "frequency (kHz)", limits = c(100,1500), breaks = sort(unique(vib.thresh$freq.hz)), labels = c("0.1","0.2", "0.3", "0.4", "0.7", "1.1", "1.5")) +
-  scale_y_continuous(name = "hearing threshold (dB)", limits = c(80,140), breaks = seq(80,140,15), labels = seq(80,140,15))
-
-
-png("~/Desktop/R Working Directory/Plots/Juv-Indiv.png", units = "in", res = 300, width = 16, height = 12)
-ggarrange(vib.thresh.plot.indiv, hear.thresh.plot.indiv, 
-          ncol = 1,
-          nrow = 2,
-          common.legend = TRUE,
-          labels = c("a", "b"),
-          font.label = list(size = 20, color = "black"))
-dev.off()
-
-
-
-
-
-
-# PLOT: Body morphology by mass ----
-
-plot.morph.corr.svl <- ggplot() +
-  
-  geom_point(data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-             aes(x = mass.g, y = svl.mm, color = num.sampling.six.cat),
-             size = 3) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mass (g)", limits = c(0.3,2)) +
-  scale_y_continuous(name = "snout-vent length (mm)")
-
-plot.morph.corr.interear <- ggplot() +
-  
-  geom_point(data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-             aes(x = mass.g, y = inter.ear.mm, color = num.sampling.six.cat),
-             size = 3) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mass (g)", limits = c(0.3,2)) +
-  scale_y_continuous(name = "inter-ear width (mm)")
-
-
-ggarrange(plot.morph.corr.svl, plot.morph.corr.interear,
-          nrow = 2,
-          common.legend =  TRUE)
-
-
-# PLOT: Body morphology by larval duration ----
-plot.larvdur.corr.mass <- ggplot() +
-  
-  geom_point(data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-             aes(x = mean.days.forelimb, y = mass.g, color = num.sampling.six.cat),
-             size = 3) +
-  
-  geom_smooth(method = "lm",
-              data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-              aes(y=mass.g, x = mean.days.forelimb, color = factor(num.sampling.six.cat), group = factor(num.sampling.six.cat))) +
-  
-  
-  geom_smooth(method = "lm",
-              data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-              color = "black",
-              aes(y=mass.g, x = mean.days.forelimb)) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mean larval duration (days)", limits = c(38,70)) +
-  scale_y_continuous(name = "mass (g)")
-
-
-plot.larvdur.corr.svl <- ggplot() +
-  
-  geom_point(data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-             aes(x = mean.days.forelimb, y = svl.mm, color = num.sampling.six.cat),
-             size = 3) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mean larval duration (days)", limits = c(38,70)) +
-  scale_y_continuous(name = "snout-vent length (mm)")
-
-plot.larvdur.corr.interear <- ggplot() +
-  
-  geom_point(data = morph.data.juv[morph.data.juv$data.type == "ephys" & morph.data.juv$gs.code == "RM" & morph.data.juv$treatment != "overflow",],
-             aes(x = mean.days.forelimb, y = inter.ear.mm, color = num.sampling.six.cat),
-             size = 3) +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        axis.text.x=element_text(size=18, color = "black", angle = 0, hjust = 0.5), 
-        axis.text.y=element_text(size=18, color = "black"),
-        axis.title.y = element_text(size=18),
-        axis.title.x = element_text(size=18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_x_continuous(name = "mean larval duration (days)", limits = c(38,70)) +
-  scale_y_continuous(name = "inter-ear width (mm)")
-
-
-ggarrange(plot.larvdur.corr.mass, plot.larvdur.corr.svl, plot.larvdur.corr.interear,
-          ncol = 3,
-          common.legend =  TRUE)
-
-
-
-
-
-
-
-
-# Redoing plots after ranid devo paper -------------------------
-
-#plot cm/s2 individual lines colored by treatment and showing means
-
-ggplot(vib.thresh[vib.thresh$Genus.species.code == "RS",]) + 
-  
-  facet_grid(cols = vars(num.sampling), drop = FALSE) +
-  
-  #individual tanks
-  geom_point(size = 1, alpha = 0.7, pch = 21, aes(y=thresh.cms2, x = Freq..Hz., color = Treatment, fill = Treatment)) +
-  geom_line(size = 0.5, alpha = 0.7, aes(y=thresh.cms2, x = Freq..Hz., color = Treatment, group = combined.id)) +
-  
-  #treatment means
-  stat_summary(fun=mean, geom="line", size = 0.8, color = "black", aes(x = Freq..Hz., y = thresh.cms2, group = Treatment), show.legend = FALSE) + #show.legend is FALSE so that alpha = 1 legend from stat summary will be plotted
-  stat_summary(fun = mean,
-               geom = "errorbar",
-               fun.max = function(x) mean(x) + sd(x) / sqrt(length(x)), #plotting +1 se
-               fun.min = function(x) mean(x) - sd(x) / sqrt(length(x)), #plotting -1 se
-               width=20, size = 0.8, colour="black", alpha=1, aes(x = Freq..Hz., y = thresh.cms2, group = Treatment)) +
-  stat_summary(fun = mean, geom="point", color = "black", pch=21, size=5, stroke = 1, aes(x = Freq..Hz., y = thresh.cms2, fill=Treatment), show.legend = TRUE) + 
-  
-  scale_color_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  scale_fill_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "none",
-        axis.text.x=element_text(size=20, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold (cm/s2)") +
-  scale_x_continuous(name = "frequency (Hz)", breaks = unique(vib.thresh$Freq..Hz.))
-
-
-#plot cm/s2 individual lines colored by individual and showing means
-ggplot(vib.thresh[vib.thresh$Genus.species.code == "RS",]) + 
-  
-  facet_grid(cols = vars(num.sampling), drop = FALSE) +
-  
-  #individual tanks
-  geom_point(size = 1, alpha = 0.7, pch = 21, aes(y=thresh.mms2, x = Freq..Hz., color = unique.id.juv, fill = unique.id.juv)) +
-  geom_line(size = 0.8, alpha = 0.7, aes(y=thresh.mms2, x = Freq..Hz., color = unique.id.juv, group = unique.id.juv)) +
-  
-  #treatment means
-  stat_summary(fun=mean, geom="line", size = 0.8, color = "black", aes(x = Freq..Hz., y = thresh.mms2), show.legend = FALSE) + #show.legend is FALSE so that alpha = 1 legend from stat summary will be plotted
-  stat_summary(fun = mean,
-               geom = "errorbar",
-               fun.max = function(x) mean(x) + sd(x) / sqrt(length(x)), #plotting +1 se
-               fun.min = function(x) mean(x) - sd(x) / sqrt(length(x)), #plotting -1 se
-               width=20, size = 0.8, colour="black", alpha=1, aes(x = Freq..Hz., y = thresh.mms2), show.legend = FALSE) +
-  stat_summary(fun = mean, geom="point", color = "black", fill = "black", pch=21, size=5, stroke = 1, aes(x = Freq..Hz., y = thresh.mms2), show.legend = FALSE) + 
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "bottom",
-        axis.text.x=element_text(size=20, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold (mm/s2)") +
-  scale_x_continuous(name = "frequency (Hz)", breaks = unique(vib.thresh$Freq..Hz.))
-
-
-#plot faceted by individuals with each timepoint as different color
-ggplot(data = vib.thresh) + 
-  
-  facet_grid(cols = vars(unique.id.juv)) +
-  
-  #individuals
-  geom_point(size = 4, stroke = 1.5, alpha = 0.7, pch = 21, aes(y=Threshold..db., x = as.numeric(Freq..Hz.), color = num.sampling, fill = num.sampling, group = num.sampling),
-             position=position_jitterdodge(jitter.width = 20, jitter.height = 0, seed = 0)) +
-  
-  geom_line(size = 0.5, alpha = 0.7, aes(y=Threshold..db., x = as.numeric(Freq..Hz.), color = num.sampling, group = num.sampling),
-            position=position_jitterdodge(jitter.width = 5, jitter.height = 0, seed = 0)) +
-  
-  scale_colour_gradient(low="lightgray", high = "black") +
-  scale_fill_gradient(low="lightgray", high = "black") +
-  
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "bottom",
-        axis.text.x=element_text(size=20, color = "black", angle = 90, vjust = 0.5, hjust=1), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold (cm/s2)") +
-  scale_x_continuous(name = "frequency (kHz)", breaks = sort(unique(vib.thresh$Freq..Hz.)), labels = c("0.1", "0.2"," 0.3", "0.4", "0.5", "0.7", "1.1", "1.5"))
-
-
-
-#plot faceted by individuals (LOW DENSITY)
-indiv.ld <- ggplot(data = vib.thresh[vib.thresh$combined.id != "RSJ00321" & vib.thresh$Treatment != "low density",]) + 
-  
-  facet_grid(cols = vars(combined.id)) +
-  
-  #individuals
-  geom_point(size = 4, stroke = 1.5, alpha = 0.7, pch = 21, color = c(natparks.pals("Arches")[4]), aes(y=Threshold..db., x = as.numeric(Freq..Hz.), fill = as.factor(num.sampling), group = as.factor(num.sampling)),
-             position=position_jitterdodge(jitter.width = 20, jitter.height = 0, seed = 0)) +
-  scale_fill_manual(values=c("darkgray", "black")) +
-  
-  geom_line(size = 0.5, alpha = 0.7, aes(y=Threshold..db., x = as.numeric(Freq..Hz.), color = as.factor(num.sampling), group = as.factor(num.sampling)),
-            position=position_jitterdodge(jitter.width = 5, jitter.height = 0, seed = 0)) +
-  
-  scale_color_manual(values=c("darkgray", "black")) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "none",
-        axis.text.x=element_text(size=20, color = "black", angle = 90, vjust = 0.5, hjust=1), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold", limits = c(45,92)) +
-  scale_x_continuous(name = "frequency (kHz)", breaks = sort(unique(vib.thresh$Freq..Hz.)), labels = c("0.1", "0.2"," 0.3", "0.4"," 0.7", "1.1", "1.5"))
-
-
-#plot faceted by individuals (HIGH DENSITY)
-indiv.hd <- ggplot(data = vib.thresh[vib.thresh$combined.id != "RSJ00321" & vib.thresh$Treatment != "high density",]) + 
-  
-  facet_grid(cols = vars(combined.id)) +
-  
-  #individuals
-  geom_point(size = 4, stroke = 1.5, alpha = 0.7, pch = 21, color = c(natparks.pals("Arches")[1]), aes(y=Threshold..db., x = as.numeric(Freq..Hz.), fill = as.factor(num.sampling), group = as.factor(num.sampling)),
-             position=position_jitterdodge(jitter.width = 20, jitter.height = 0, seed = 0)) +
-  scale_fill_manual(values=c("darkgray", "black")) +
-  
-  geom_line(size = 0.5, alpha = 0.7, aes(y=Threshold..db., x = as.numeric(Freq..Hz.), color = as.factor(num.sampling), group = as.factor(num.sampling)),
-            position=position_jitterdodge(jitter.width = 5, jitter.height = 0, seed = 0)) +
-  
-  scale_color_manual(values=c("darkgray", "black")) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "none",
-        axis.text.x=element_text(size=20, color = "black", angle = 90, vjust = 0.5, hjust=1), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold", limits = c(45,92)) +
-  scale_x_continuous(name = "frequency (kHz)", breaks = sort(unique(vib.thresh$Freq..Hz.)), labels = c("0.1", "0.2"," 0.3", "0.4"," 0.7", "1.1", "1.5"))
-
-#panel plot
-ggarrange(indiv.ld, indiv.hd,
-          nrow = 2)
-
-
-#plot faceted by individuals (LOW DENSITY) + MASS
-deltamass.ld <- ggplot(data = vib.thresh[vib.thresh$combined.id != "RSJ00321" & vib.thresh$Treatment != "low density",]) + 
-  
-  facet_grid(cols = vars(combined.id)) +
-  
-  #individuals
-  geom_line(size = 1, alpha = 1, color = c(natparks.pals("Arches")[4]), aes(y=Weight..g., x = as.numeric(num.sampling))) +
-  geom_point(size = 4, stroke = 1.5, alpha = 1, pch = 21, color = c(natparks.pals("Arches")[4]), aes(y=Weight..g., x = as.numeric(num.sampling), fill = as.factor(num.sampling))) +
-
-  scale_color_manual(values=c("darkgray", "black")) +
-  scale_fill_manual(values=c("darkgray", "black")) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "none",
-        axis.text.x=element_text(size=12, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "mass (g)", limits = c(0.3, 1.8), breaks = seq(0.4,1.8,0.2)) +
-  scale_x_continuous(name = "post-metamorphic age (weeks)", limits = c(1,2), breaks = c(1,2), labels = c("11-12", "31-31"))
-
-
-#plot faceted by individuals (HIGH DENSITY) + MASS
-deltamass.hd <- ggplot(data = vib.thresh[vib.thresh$combined.id != "RSJ00321" & vib.thresh$Treatment != "high density",]) + 
-  
-  facet_grid(cols = vars(combined.id)) +
-  
-  #individuals
-  geom_line(size = 1, alpha = 1, color = c(natparks.pals("Arches")[1]), aes(y=Weight..g., x = as.numeric(num.sampling))) +
-  geom_point(size = 4, stroke = 1.5, alpha = 1, pch = 21, color = c(natparks.pals("Arches")[1]), aes(y=Weight..g., x = as.numeric(num.sampling), fill = as.factor(num.sampling))) +
-  
-  scale_color_manual(values=c("darkgray", "black")) +
-  scale_fill_manual(values=c("darkgray", "black")) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "none",
-        axis.text.x=element_text(size=12, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "mass (g)", limits = c(0.3, 1.8), breaks = seq(0.4,1.8,0.2)) +
-  scale_x_continuous(name = "post-metamorphic age (weeks)", limits = c(1,2), breaks = c(1,2), labels = c("11-12", "31-31"))
-
-#panel plot
-ggarrange(deltamass.ld, deltamass.hd,
-          nrow = 2)
-
-
-#plot threshold by mass and treatment
-ggplot() + 
-  
-  facet_grid(rows = vars(num.sampling), cols = vars(Freq..Hz.)) +
-  
-  geom_point(position=position_jitterdodge(jitter.width = 0, jitter.height = 0, seed = 0), pch = 21, size = 2, alpha = 0.7, show.legend = FALSE,
-             data = vib.thresh,
-             aes(y=Threshold..db., x = Weight..g., color = Treatment, fill = Treatment)) +
-  #geom_ribbon(data = predicted.df.morph.mm,
-              #alpha = 0.4,
-              #mapping = aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high), show.legend = FALSE) +
-  #geom_line(data = predicted.df.morph.mm, size = 1, color = "black", aes(x = x, y = predicted, group = group)) +
-  
-  geom_smooth(data = vib.thresh, method = "lm",
-              mapping = aes(y=Threshold..db., x = Weight..g., color = Treatment, fill = Treatment),
-              se=FALSE) +
-  
-  scale_color_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  scale_fill_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  theme_bw() +
-  theme(legend.position = c(0.02, 0.98),
-        legend.justification = c("left", "top"),
-        legend.title = element_blank(),
-        legend.text = element_text(size=10),
-        axis.text.x=element_text(size=20, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold") +
-  scale_x_continuous(name = "mass (g)")
-
-
-#plot threshold by mass
-ggplot() + 
-  
-  facet_grid(rows = vars(num.sampling), cols = vars(Freq..Hz.)) +
-  
-  geom_point(pch = 21, size = 2, alpha = 0.7, show.legend = FALSE,
-             data = vib.thresh,
-             aes(y=Threshold..db., x = Weight..g.)) +
-  #geom_ribbon(data = predicted.df.morph.mm,
-  #alpha = 0.4,
-  #mapping = aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high), show.legend = FALSE) +
-  #geom_line(data = predicted.df.morph.mm, size = 1, color = "black", aes(x = x, y = predicted, group = group)) +
-  
-  geom_smooth(data = vib.thresh, method = "lm",
-              mapping = aes(y=Threshold..db., x = Weight..g.),
-              se=FALSE) +
-  
-  #scale_color_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  #scale_fill_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  theme_bw() +
-  theme(legend.position = c(0.02, 0.98),
-        legend.justification = c("left", "top"),
-        legend.title = element_blank(),
-        legend.text = element_text(size=10),
-        axis.text.x=element_text(size=20, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "threshold") +
-  scale_x_continuous(name = "mass (g)")
-
-
-#plots individual changes
-unique(vib.thresh$combined.id[vib.thresh$num.sampling == 2])
-
-vib.thresh.change <- data.frame(
-  combined.id = sort(rep(unique(vib.thresh$combined.id[vib.thresh$num.sampling == 2]), length(unique(vib.thresh$Freq..Hz.)))),
-  freq.hz = rep(sort(unique(vib.thresh$Freq..Hz.)), length(unique(vib.thresh$combined.id[vib.thresh$num.sampling == 2]))),
-  treatment = factor(NA, levels = c("high density", "low density", "overflow")) 
-)
-
-for(i in 1:length(unique(vib.thresh.change$combined.id))){
-  
-  for(j in 1:length(unique(vib.thresh.change$freq.hz))){
-    
-    vib.thresh.change$treatment[vib.thresh.change$combined.id == unique(vib.thresh.change$combined.id)[i]] = factor(vib.thresh$Treatment[vib.thresh$combined.id == unique(vib.thresh.change$combined.id)[i]][1], levels = c("high density", "low density", "overflow")) 
-    
-    vib.thresh.change$thresh.1[vib.thresh.change$combined.id == unique(vib.thresh.change$combined.id)[i] & vib.thresh.change$freq.hz == unique(vib.thresh.change$freq.hz)[j]] = vib.thresh$Threshold..db.[vib.thresh$combined.id == unique(vib.thresh.change$combined.id)[i] & vib.thresh$Freq..Hz. == unique(vib.thresh.change$freq.hz)[j] & vib.thresh$num.sampling == 1] 
-   
-    
-    vib.thresh.change$thresh.2[vib.thresh.change$combined.id == unique(vib.thresh.change$combined.id)[i] & vib.thresh.change$freq.hz == unique(vib.thresh.change$freq.hz)[j]] = vib.thresh$Threshold..db.[vib.thresh$combined.id == unique(vib.thresh.change$combined.id)[i] & vib.thresh$Freq..Hz. == unique(vib.thresh.change$freq.hz)[j] & vib.thresh$num.sampling == 2] 
-    
-    }
-  }
-
-vib.thresh.change$delta.thresh = vib.thresh.change$thresh.2 - vib.thresh.change$thresh.1
-
-vib.thresh.change$treatment = factor(vib.thresh.change$treatment, levels = c("low density", "high density", "overflow"))
-
-ggplot() + 
-  
-  geom_point(position=position_jitterdodge(jitter.width = 5, jitter.height = 0.5, seed = 0),
-             size = 2, alpha = 0.7, show.legend = TRUE,
-             data = vib.thresh.change,
-             aes(y=delta.thresh, x = freq.hz, color = treatment, group = combined.id)) +
-
-  geom_line(position=position_jitterdodge(jitter.width = 5, jitter.height = 0.5, seed = 0),
-             size = 0.5, alpha = 0.7, show.legend = TRUE,
-             data = vib.thresh.change,
-             aes(y=delta.thresh, x = freq.hz, color = treatment, group = combined.id)) +
-
-
-  #add horizontal zero line
-  geom_hline(yintercept = 0, colour = "black", lty = 3) +
-
-  #treatment means
-  stat_summary(data = vib.thresh.change, fun=mean, geom="line", size = 0.8, color = "black", aes(x = freq.hz, y = delta.thresh, group = treatment), show.legend = TRUE) + #show.legend is FALSE so that alpha = 1 legend from stat summary will be plotted
-  stat_summary(data = vib.thresh.change, fun = mean,
-               geom = "errorbar",
-               fun.max = function(x) mean(x) + sd(x) / sqrt(length(x)), #plotting +1 se
-               fun.min = function(x) mean(x) - sd(x) / sqrt(length(x)), #plotting -1 se
-               width=20, size = 0.8, colour="black", alpha=1, aes(x = freq.hz, y = delta.thresh, group = treatment)) +
-  stat_summary(data = vib.thresh.change, fun = mean, geom="point", color = "black", pch=21, size=5, stroke = 1, aes(x = freq.hz, y = delta.thresh, fill=treatment), show.legend = TRUE) + 
-  
-  scale_color_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  scale_fill_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=10),
-        axis.text.x=element_text(size=20, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "delta threshold", breaks = seq(-18,10,3)) +
-  scale_x_continuous(name = "frequency (Hz)", breaks = unique(vib.thresh.change$freq.hz))
-
-
-
-
-#  PLOT RELATIVE THRESHOLD DB plot individual lines colored by treatment and showing means
-ggplot(vib.thresh[vib.thresh$Genus.species.code == "RS",]) + 
-  
-  facet_grid(cols = vars(postmm.sampling), drop = FALSE) +
-  
-  #individual tanks
-  geom_point(size = 1, alpha = 0.7, pch = 21, aes(y=rel.dB, x = Freq..Hz., color = Treatment, fill = Treatment)) +
-  geom_line(size = 0.5, alpha = 0.7, aes(y=rel.dB, x = Freq..Hz., color = Treatment, group = combined.id)) +
-  
-  #treatment means
-  stat_summary(fun=mean, geom="line", size = 0.8, color = "black", aes(x = Freq..Hz., y = rel.dB, group = Treatment), show.legend = FALSE) + #show.legend is FALSE so that alpha = 1 legend from stat summary will be plotted
-  stat_summary(fun = mean,
-               geom = "errorbar",
-               fun.max = function(x) mean(x) + sd(x) / sqrt(length(x)), #plotting +1 se
-               fun.min = function(x) mean(x) - sd(x) / sqrt(length(x)), #plotting -1 se
-               width=20, size = 0.8, colour="black", alpha=1, aes(x = Freq..Hz., y = rel.dB, group = Treatment)) +
-  stat_summary(fun = mean, geom="point", color = "black", pch=21, size=5, stroke = 1, aes(x = Freq..Hz., y = rel.dB, fill=Treatment), show.legend = TRUE) + 
-  
-  scale_color_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  scale_fill_manual(values=c(natparks.pals("Arches")[4], natparks.pals("Arches")[1])) +
-  theme_bw() +
-  theme(legend.title = element_blank(),
-        legend.text = element_text(size=20),
-        legend.position = "none",
-        axis.text.x=element_text(size=20, color = "black"), 
-        axis.text.y=element_text(size=20, color = "black"), 
-        axis.title.x=element_text(size=20, color = "black"), 
-        axis.title.y = element_text(size=20),
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_y_continuous(name = "relative threshold (dB)") +
-  scale_x_continuous(name = "frequency (Hz)", breaks = unique(vib.thresh$Freq..Hz.))
-
-
-
-
-
-
-
+# Figure 3 alternate: individual threshold relative to own curve at 3 months (- or + dB from no change at 0) -- easy to see at a glance if individuals get better or worse across frequencies for 6 months and 12 months
