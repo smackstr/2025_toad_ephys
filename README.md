@@ -5,7 +5,7 @@ This project analyzes experimental data to assess how size, development time, an
 - cleaning and joining of four databases using base R and tidyverse
 - generalized linear mixed models
 - model comparison and selection using AICc
-- visualization using ggplot and levelplot
+- visualization using ggplot2 and levelplot
 
 This project includes all the code and datasets associated with an in-prep manuscript.
 
