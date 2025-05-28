@@ -52,6 +52,7 @@ vib.thresh <- vib.thresh %>%
          unique.id.juv = factor(paste(gs.code, clutch, tank.id, sep = "_")),
          life.stage.num.sampling = factor(paste(life.stage, num.sampling, sep = "_")),
          id.life.stage.num.sampling = factor(paste(combined.id, life.stage, num.sampling, sep = "_")),
+         combined.id.freq = factor(paste(combined.id, freq.hz, sep = "_")),
          # convert vibration threshold to m/s2 [[acceleration (m/s2) = (10^((rawdB-120)/20))*9.81]]
          thresh.ms2 = (10^((thresh.db-120)/20))*9.81,
          #thresh.cms2 = 100*((10^((thresh.db-120)/20))*9.81),
@@ -88,6 +89,7 @@ hear.thresh <- hear.thresh %>%
          unique.id.juv = factor(paste(gs.code, clutch, tank.id, sep = "_")),
          life.stage.num.sampling = factor(paste(life.stage, num.sampling, sep = "_")),
          id.life.stage.num.sampling = factor(paste(combined.id, life.stage, num.sampling, sep = "_")),
+         combined.id.freq = factor(paste(combined.id, freq.hz, sep = "_")),
          clip.thresh.db.plus3 = if_else(is.na(clip.thresh.db.plus3) == TRUE & is.na(thresh.db) == FALSE, 
                                         thresh.db,
                                         clip.thresh.db.plus3), #allows better plotting because individual can have connected lines across frequencies, but then code overlays white points where clipping occurred
@@ -101,9 +103,9 @@ hear.thresh <- hear.thresh %>%
   #remove individuals not included in final dataset
   dplyr::filter(date != "2025-04-24", #weird data day for RM_C_J029_6
     freq.hz != 400,
-    !(date == "2025-05-06" & combined.id != "RM_J041_8"),
-    !(date == "2025-05-12" & combined.id != "RM_J041_8"),
-    !(date == "2025-05-05" & combined.id == "RM_J041_9"),
+    !(date == "2025-05-06" & combined.id == "RM_J041_8"), #remove problematic individual J041_08
+    !(date == "2025-05-12" & combined.id == "RM_J041_8"), #remove problematic individual J041_08
+    !(date == "2025-05-05" & combined.id == "RM_J041_9"), #remove problematic date for one individual J041_09
         combined.id != "RM_NA_1", #odd adult
     combined.id != "RM_J027_4") #overflow individual
 
@@ -135,7 +137,7 @@ morph.data.juv <- morph.data.juv %>%
 vib.thresh.juv = vib.thresh %>% filter(life.stage == "juvenile")
 hear.thresh.juv = hear.thresh %>% filter(life.stage == "juvenile")
 
-# create clean datasets without NAs to use for dredge
+# create clean datasets without NAs to use, if needed
 vib.thresh.clean = vib.thresh %>% filter(is.na(thresh.db) == FALSE)
 hear.thresh.clean = hear.thresh %>% filter(is.na(thresh.db) == FALSE)
 
@@ -165,6 +167,79 @@ hear.thresh.summary <- hear.thresh %>%
             sd.thresh.db = sd(thresh.db, na.rm= TRUE),
             mean.mass.g = mean(mass.g, na.rm = TRUE),
             mean.svl.mm = mean(svl.mm, na.rm = TRUE))
+
+# Create difference-based databases --------------------------
+
+#function to create database that sets threshold to 0 at initial testing then calculates threshold difference between timepoints
+thresh_diff_db <- function(db){
+  db.temp <- bind_rows(
+    # join first sampling point with next two sampling points, filling in the thresh.diff column as the sampling points are joined
+    # using thresh.diff.clip when threshold above clipping
+    db %>%
+      mutate(thresh.db.diff = case_when(is.na(thresh.db) == FALSE ~ 0,
+                                        is.na(thresh.db) == TRUE ~ NA),
+             clip.thresh.db.diff = case_when(is.na(thresh.db) == FALSE ~ NA,
+                                             is.na(thresh.db) == TRUE ~ 0)
+      ) %>%
+      filter(num.sampling == 1),
+    
+    db %>% #calculate difference in threshold between first and second sampling, based on joining to id and frequency
+      filter(num.sampling == 2) %>%
+      left_join( 
+        db %>%
+          filter(num.sampling == 1) %>% 
+          mutate(thresh.db.1 = thresh.db,
+                 clip.thresh.db.1 = clip.thresh.db.plus3) %>%
+          select(combined.id.freq, thresh.db.1, clip.thresh.db.1) %>%
+          left_join(
+            db %>%
+              filter(num.sampling == 2) %>%
+              mutate(thresh.db.2 = thresh.db,
+                     clip.thresh.db.2 = clip.thresh.db.plus3) %>%
+              select(combined.id.freq, thresh.db.2, clip.thresh.db.2),
+            by = "combined.id.freq"
+          )  %>%
+          mutate(thresh.db.diff = thresh.db.2-thresh.db.1,
+                 clip.thresh.db.diff = clip.thresh.db.2 - clip.thresh.db.1) %>%
+          select(combined.id.freq, thresh.db.diff, clip.thresh.db.diff),
+        by = "combined.id.freq"
+      ),
+    
+    db %>% #calculate difference in threshold between first and third sampling, based on joining to id and frequency
+      filter(num.sampling == 3) %>%
+      left_join( 
+        db %>%
+          filter(num.sampling == 1) %>% 
+          mutate(thresh.db.1 = thresh.db,
+                 clip.thresh.db.1 = clip.thresh.db.plus3) %>%
+          select(combined.id.freq, thresh.db.1, clip.thresh.db.1) %>%
+          left_join(
+            db %>%
+              filter(num.sampling == 3) %>%
+              mutate(thresh.db.2 = thresh.db,
+                     clip.thresh.db.2 = clip.thresh.db.plus3) %>%
+              select(combined.id.freq, thresh.db.2, clip.thresh.db.2),
+            by = "combined.id.freq"
+          )  %>%
+          mutate(thresh.db.diff = thresh.db.2-thresh.db.1,
+                 clip.thresh.db.diff = clip.thresh.db.2 - clip.thresh.db.1) %>%
+          select(combined.id.freq, thresh.db.diff, clip.thresh.db.diff),
+        by = "combined.id.freq"
+      )
+  )
+  assign(paste(deparse(substitute(db)), "diff", sep = "."), db.temp, envir = .GlobalEnv)
+}
+
+# run function for each database
+thresh_diff_db(vib.thresh.juv)
+thresh_diff_db(hear.thresh.juv)
+
+# Can double-check difference calculations with the following function check_diff
+check_diff = function(db, indiv) {
+  View(db %>% filter(combined.id == indiv) %>% select(date, num.sampling, freq.hz, thresh.db, thresh.db.diff, clip.thresh.db.diff))
+}
+check_diff(vib.thresh.juv.diff, "RM_J001_10")
+check_diff(hear.thresh.juv.diff, "RM_J001_10")
 
 # Create function to determine random effects structure ------------
 thresh_reffects_juv = function(x){
@@ -842,8 +917,79 @@ ggarrange(vib.thresh.plot.reldB, hear.thresh.plot,
           font.label = list(size = 20, color = "black"))
 dev.off()
 
+# Figure 3 alternate: individual threshold relative to own curve at 3 months (- or + dB from no change at 0) -- easy to see at a glance if individuals get better or worse across frequencies for 6 months and 12 months -------------------
+diff_thresh_plot_juv <- function(d, y_var, y_var_clip, y_title){
+  y_var = sym(y_var)
+  y_var_clip = sym(y_var_clip)
+  
+  fig <- ggplot() +
+    
+    geom_hline(yintercept = 0, color = "gray15", size = 1, linetype = 1) + #add horizontal line at 0 change
+    
+    geom_point(data = d %>%
+                 filter(num.sampling > 1),
+               aes(y=!!y_var_clip, x = freq.hz, color = factor(num.sampling), group = id.life.stage.num.sampling),
+               size = 3, alpha=0.3, show.legend = FALSE) +
+    
+    geom_line(data = d %>%
+                filter(num.sampling > 1),
+              aes(y=!!y_var_clip, x = freq.hz, color = factor(num.sampling), group = id.life.stage.num.sampling),
+              size = 1, alpha=0.3, show.legend = FALSE) +
+    
+    #add points where threshold above clipping level
+    geom_point(data = d %>%
+                 filter(num.sampling > 1) %>%
+                 filter(is.na(!!y_var) == TRUE), #need to convert units within this line
+               fill = "white", pch = 21,
+               aes(y=!!y_var_clip, x = freq.hz, color = factor(num.sampling), group = id.life.stage.num.sampling),
+               size = 3, stroke = 1, alpha=1.0, show.legend = FALSE) +
+    
+    # mean points and lines based on non-clipped values
+    stat_summary(data = d %>%
+                   filter(num.sampling > 1),
+                 fun.y=mean, geom="line", size = 1.2, colour="black",
+                 aes(y=!!y_var, x = freq.hz, group = factor(num.sampling)), show.legend = FALSE) +
 
+    stat_summary(data = d %>%
+                   filter(num.sampling > 1),
+                 fun.data=function(x){mean_cl_normal(x, conf.int=.683)}, geom="errorbar",
+                 width=0.1, size = 0.9, colour="black", alpha=1,
+                 aes(y=!!y_var, x = freq.hz, group = factor(num.sampling)), show.legend = FALSE) +
 
+    stat_summary(data = d %>%
+                   filter(num.sampling > 1),
+                 fun.y=mean, geom="point", colour = "black", pch=21, size=9,
+                 aes(y=!!y_var, x = freq.hz, fill = factor(num.sampling), group = factor(num.sampling)), show.legend = TRUE) +
 
+    scale_colour_manual(values = c("#660066", "#330066"), labels = c("6 months", "12 months")) +
+    scale_fill_manual(values = c("#660066", "#330066"), labels = c("6 months", "12 months")) +
+    
+    theme_bw() +
+    theme(legend.title = element_blank(),
+          legend.text = element_text(size=14),
+          axis.text.x=element_text(size=18, color = "black", angle = 90, hjust = 1, vjust = 0.5),
+          axis.text.y=element_text(size=18, color = "black"),
+          axis.title.y = element_text(size=18),
+          axis.title.x = element_text(size=18),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    scale_x_continuous(name = "frequency (Hz)", limits = c(100,2000), 
+                       breaks = if(max(d$freq.hz) < 2000){
+                         c(sort(unique(d$freq.hz)), 2000)}else{
+                           c(100,200,sort(unique(d$freq.hz)))}, 
+                       labels = if(max(d$freq.hz) < 2000){
+                         c(sort(unique(d$freq.hz)), 2000)}else{
+                           c(100,200,sort(unique(d$freq.hz)))}) +
+    scale_y_continuous(name = y_title, limits = c(-35,25), breaks = seq(-35,25,5), labels = seq(-35,25,5))
+}
 
-# Figure 3 alternate: individual threshold relative to own curve at 3 months (- or + dB from no change at 0) -- easy to see at a glance if individuals get better or worse across frequencies for 6 months and 12 months
+png("~/Desktop/R Working Directory/Plots/Figure3.png", units = "in", res = 300, width = 16, height = 12)
+ggarrange(
+  diff_thresh_plot_juv(vib.thresh.juv.diff, "thresh.db.diff", "clip.thresh.db.diff", "vibration threshold relative to 3 months"),
+  diff_thresh_plot_juv(hear.thresh.juv.diff, "thresh.db.diff", "clip.thresh.db.diff", "hearing threshold relative to 3 months"),
+  common.legend = TRUE,
+  labels = c("a", "b"),
+  font.label = list(size = 20, color = "black")
+)
+dev.off()
